@@ -21,6 +21,8 @@ make -j4
 
 cd ../..
 
+chmod +x build.sh
+
 ./build.sh build
 
 Windows:
