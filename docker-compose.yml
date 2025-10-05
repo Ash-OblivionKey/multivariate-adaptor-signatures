@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  # Main development and testing service
+  adaptor-signatures:
+    build: .
+    container_name: multivariate-adaptor
+    volumes:
+      - .:/workspace
+      - ./results:/workspace/build/results
+    working_dir: /workspace
+    command: /bin/bash
+    stdin_open: true
+    tty: true
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+      - TZ=UTC
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+
+  # Quick test service
+  test:
+    build: .
+    container_name: multivariate-adaptor-test
+    volumes:
+      - .:/workspace
+      - ./results:/workspace/build/results
+    working_dir: /workspace
+    command: |
+      bash -c "
+        echo 'Running quick test suite...' &&
+        cd build &&
+        ./bin/test_core --scheme UOV --level 128 &&
+        ./bin/test_negative --scheme UOV --level 128 &&
+        ./bin/test_integration --csv &&
+        ./bin/test_bench --iterations 5 --csv &&
+        echo 'All tests completed successfully!'
+      "
+
+  # Benchmark service
+  benchmark:
+    build: .
+    container_name: multivariate-adaptor-bench
+    volumes:
+      - .:/workspace
+      - ./results:/workspace/build/results
+    working_dir: /workspace
+    command: |
+      bash -c "
+        echo 'Running comprehensive benchmarks...' &&
+        cd build &&
+        ./bin/test_bench --iterations 100 --csv --detailed &&
+        echo 'Benchmarks completed!'
+      "
+
+  # Development shell
+  dev:
+    build: .
+    container_name: multivariate-adaptor-dev
+    volumes:
+      - .:/workspace
+      - ./results:/workspace/build/results
+    working_dir: /workspace
+    command: /bin/bash
+    stdin_open: true
+    tty: true
+    environment:
+      - DEBIAN_FRONTEND=noninteractive
+      - TZ=UTC
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8
+    ports:
+      - "8080:8080"  # For web interfaces if needed
+
+# Networks
+networks:
+  default:
+    name: multivariate-adaptor-network
