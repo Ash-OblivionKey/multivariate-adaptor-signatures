@@ -1,6 +1,4 @@
-Multivariate Witness Hiding Adaptor Signatures
-
-Implementation of Multivariate Witness Hiding Adaptor Signatures (MWAS) extending UOV and MAYO post-quantum signature schemes with adaptor functionality. Includes formal construction, security analysis, and empirical performance evaluation across multiple security levels.
+Multivariate Witness Hiding Adaptor Signatures for post-quantum cryptography. Extends UOV and MAYO schemes with adaptor functionality for atomic swaps and privacy-preserving protocols.
 
 clone our project then clone liboqs
 git clone https://github.com/open-quantum-safe/liboqs.git
