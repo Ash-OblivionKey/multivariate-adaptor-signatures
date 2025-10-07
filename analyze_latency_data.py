@@ -223,9 +223,13 @@ def create_performance_comparison(data):
                 df = data[L]
                 row = df[(df["Scheme"] == scheme) & (df["Security_Level"] == level)]
                 if not row.empty:
-                    y_mean.append(row["Peak_Memory_MB"].iloc[0])
+                    # FIX: CSV column "Peak_Memory_MB" actually contains bytes, not MB
+                    # Convert bytes to MB (divide by 1024*1024) to fix $1e10$ plotting artifact
+                    memory_bytes = row["Peak_Memory_MB"].iloc[0]
+                    memory_mb = memory_bytes / (1024 * 1024)
+                    y_mean.append(memory_mb)
                     # Memory typically has low variance, use small std for visualization
-                    y_std.append(y_mean[-1] * 0.05)  # 5% of mean as std
+                    y_std.append(memory_mb * 0.05)  # 5% of mean as std
                 else:
                     y_mean.append(np.nan)
                     y_std.append(np.nan)
