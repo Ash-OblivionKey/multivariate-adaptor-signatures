@@ -100,7 +100,8 @@ cd "Multivariate Witness Hiding Adaptor Signatures"
 # Clone liboqs dependency
 git clone https://github.com/open-quantum-safe/liboqs.git
 cd liboqs
-mkdir build && cd build
+mkdir build
+cd build
 cmake -DCMAKE_BUILD_TYPE=Release -DOQS_USE_OPENSSL=ON -DOQS_BUILD_ONLY_LIB=ON -DOQS_DIST_BUILD=ON ..
 make -j4
 cd ../..
@@ -120,7 +121,7 @@ cd liboqs
 mkdir build
 cd build
 cmake -DCMAKE_BUILD_TYPE=Release -DOQS_USE_OPENSSL=ON -DOQS_BUILD_ONLY_LIB=ON -DOQS_DIST_BUILD=ON ..
-make -j4
+cmake --build . --config Release
 cd ../..
 
 build.bat
