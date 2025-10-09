@@ -33,11 +33,59 @@ results/
 
 ## Prerequisites
 
+### System Requirements
 - CMake 3.16 or higher
 - GCC/Clang with C99 support
 - OpenSSL for cryptographic operations
-- Python 3 for analysis scripts
+- Python 3.8+ for analysis scripts
 - Docker (optional, for containerized builds)
+
+### System Setup Commands
+
+#### Ubuntu/Debian
+```bash
+# Update system packages
+sudo apt update && sudo apt upgrade -y
+
+# Install build essentials and dependencies
+sudo apt install -y build-essential cmake git wget curl
+sudo apt install -y libssl-dev pkg-config
+sudo apt install -y python3 python3-pip python3-venv
+sudo apt install -y python3-dev python3-numpy python3-matplotlib
+
+# Install Python packages for graph generation
+pip3 install numpy pandas matplotlib seaborn
+```
+
+#### CentOS/RHEL/Fedora
+```bash
+# Update system packages
+sudo dnf update -y  # or sudo yum update -y for older versions
+
+# Install build essentials and dependencies
+sudo dnf install -y gcc gcc-c++ make cmake git wget curl
+sudo dnf install -y openssl-devel pkgconfig
+sudo dnf install -y python3 python3-pip python3-devel
+sudo dnf install -y numpy matplotlib
+
+# Install Python packages for graph generation
+pip3 install pandas seaborn
+```
+
+#### Arch Linux
+```bash
+# Update system packages
+sudo pacman -Syu
+
+# Install build essentials and dependencies
+sudo pacman -S base-devel cmake git wget curl
+sudo pacman -S openssl pkgconf
+sudo pacman -S python python-pip
+sudo pacman -S python-numpy python-matplotlib
+
+# Install Python packages for graph generation
+pip install pandas seaborn
+```
 
 ## Installation
 
@@ -53,10 +101,7 @@ cd "Multivariate Witness Hiding Adaptor Signatures"
 git clone https://github.com/open-quantum-safe/liboqs.git
 cd liboqs
 mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release \
-      -DOQS_USE_OPENSSL=ON \
-      -DOQS_BUILD_ONLY_LIB=ON \
-      -DOQS_DIST_BUILD=ON ..
+cmake -DCMAKE_BUILD_TYPE=Release -DOQS_USE_OPENSSL=ON -DOQS_BUILD_ONLY_LIB=ON -DOQS_DIST_BUILD=ON ..
 make -j4
 cd ../..
 
