@@ -94,6 +94,15 @@ pip install pandas seaborn
 ### Linux/Raspberry Pi
 
 ```bash
+# Update system packages first
+sudo apt update && sudo apt upgrade -y
+
+# Install essential build dependencies
+sudo apt install -y build-essential cmake git libssl-dev python3 python3-pip
+
+# Install Python packages for analysis and graph generation
+pip3 install numpy pandas matplotlib seaborn
+
 git clone https://github.com/Ash-OblivionKey/multivariate-adaptor-signatures.git
 cd "Multivariate Witness Hiding Adaptor Signatures"
 
@@ -107,6 +116,9 @@ make -j4
 cd ../..
 
 ./build.sh build
+
+# Verify installation
+ls -la build/bin/
 ```
 
 ### Windows
@@ -120,17 +132,85 @@ git clone https://github.com/open-quantum-safe/liboqs.git
 cd liboqs
 mkdir build
 cd build
-cmake -DCMAKE_BUILD_TYPE=Release -DOQS_USE_OPENSSL=ON -DOQS_BUILD_ONLY_LIB=ON -DOQS_DIST_BUILD=ON ..
+cmake -G "Visual Studio 17 2022" -DCMAKE_BUILD_TYPE=Release -DOQS_USE_OPENSSL=ON -DOQS_BUILD_ONLY_LIB=ON -DOQS_DIST_BUILD=ON ..
 cmake --build . --config Release
 cd ../..
 
 build.bat
 ```
 
+**Alternative for Windows (if Visual Studio not available):**
+```cmd
+# Install MinGW-w64 or use Git Bash with make
+cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DOQS_USE_OPENSSL=ON -DOQS_BUILD_ONLY_LIB=ON -DOQS_DIST_BUILD=ON ..
+mingw32-make -j4
+```
+
 ### Docker
 
 ```bash
 docker-compose up --build
+```
+
+## Troubleshooting
+
+### Common Build Issues
+
+#### CMake Errors
+```bash
+# If cmake command not found
+sudo apt install cmake
+
+# If OpenSSL not found
+sudo apt install libssl-dev
+
+# If compiler not found
+sudo apt install build-essential
+```
+
+#### Python Import Errors
+```bash
+# If matplotlib/seaborn import fails
+pip3 install --upgrade pip
+pip3 install numpy pandas matplotlib seaborn
+
+# If permission errors
+pip3 install --user numpy pandas matplotlib seaborn
+```
+
+#### Build Failures
+```bash
+# Clean and rebuild
+rm -rf build/
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release -DOQS_USE_OPENSSL=ON -DOQS_BUILD_ONLY_LIB=ON -DOQS_DIST_BUILD=ON ..
+make -j4
+```
+
+#### Network Latency Testing Issues
+```bash
+# If tc command not found
+sudo apt install iproute2
+
+# If permission denied for tc
+sudo chmod +s /sbin/tc
+```
+
+### Verification Steps
+
+After installation, verify everything works:
+
+```bash
+# Check if binaries were created
+ls -la build/bin/Unit_Tests/
+ls -la build/bin/Performance_Tests/
+
+# Run a quick test
+cd build/bin/Unit_Tests
+./test_core --scheme UOV --level 128
+
+# Check Python analysis script
+python3 analyze_latency_data.py --help
 ```
 
 ## Testing
@@ -200,6 +280,21 @@ sudo tc qdisc del dev eth0 root
 ```bash
 python3 analyze_latency_data.py
 ```
+
+### Expected Outputs
+
+After running the analysis script, you should see these files generated in `results/performance/`:
+
+- `latency_analysis.pdf/png/svg` - Comprehensive latency analysis charts
+- `throughput_heatmap.pdf/png/svg` - Performance heatmaps across schemes and security levels
+- `operation_breakdown.pdf/png/svg` - Detailed operation timing breakdowns
+- `degradation_analysis.pdf/png/svg` - Performance degradation analysis under network latency
+
+The analysis script automatically:
+- Loads all latency CSV files (30ms, 120ms, 225ms, 320ms)
+- Generates publication-quality graphs with research-grade styling
+- Saves results in multiple formats (PDF, PNG, SVG)
+- Provides statistical analysis and performance comparisons
 
 ## Configuration
 
