@@ -98,7 +98,8 @@ pip install pandas seaborn
 sudo apt update && sudo apt upgrade -y
 
 # Install essential build dependencies
-sudo apt install -y build-essential cmake git libssl-dev python3 python3-pip
+sudo apt update && sudo apt install -y build-essential cmake pkg-config libssl-dev
+sudo apt install -y git python3 python3-pip
 
 # Install Python packages for analysis and graph generation
 pip3 install numpy pandas matplotlib seaborn
@@ -114,6 +115,9 @@ cd build
 cmake -DCMAKE_BUILD_TYPE=Release -DOQS_USE_OPENSSL=ON -DOQS_BUILD_ONLY_LIB=ON -DOQS_DIST_BUILD=ON ..
 make -j4
 cd ../..
+
+# Make build script executable
+chmod +x build.sh
 
 ./build.sh build
 
