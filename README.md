@@ -1,184 +1,176 @@
-Multivariate Witness Hiding Adaptor Signatures for post-quantum cryptography. Extends UOV and MAYO schemes with adaptor functionality for atomic swaps and privacy-preserving protocols.
+# Multivariate Witness Hiding Adaptor Signatures (MWAS)
 
-clone our project then clone liboqs
-git clone https://github.com/open-quantum-safe/liboqs.git
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](build.bat)
+[![Research](https://img.shields.io/badge/type-research-orange.svg)](README.md)
 
-Linux/Raspberry Pi:
+A research implementation of Multivariate Witness Hiding Adaptor Signatures (MWAS) extending UOV and MAYO post-quantum signature schemes with adaptor functionality. This project includes formal construction, security analysis, and empirical performance evaluation across multiple security levels.
 
+## Overview
+
+This project implements a novel cryptographic primitive that combines multivariate cryptography (UOV and MAYO schemes), witness hiding properties, adaptor signature functionality, and post-quantum security guarantees. The implementation provides comprehensive testing, benchmarking, and performance analysis tools for evaluating the schemes under various network conditions.
+
+## Architecture
+
+```
+src/
+├── implementations/     # Core cryptographic implementations
+├── interfaces/         # Public API definitions
+└── utils/             # Utility functions and helpers
+
+tests/
+├── Unit Tests/        # Core functionality tests
+├── Integration Tests/ # End-to-end workflow tests
+├── Performance Tests/ # Benchmarking and profiling
+└── Robustness Tests/  # Stress and negative testing
+
+results/
+├── performance/       # Benchmark results and analysis
+├── unit/             # Unit test results
+├── integration/      # Integration test results
+└── robustness/       # Robustness test results
+```
+
+## Prerequisites
+
+- CMake 3.16 or higher
+- GCC/Clang with C99 support
+- OpenSSL for cryptographic operations
+- Python 3 for analysis scripts
+- Docker (optional, for containerized builds)
+
+## Installation
+
+### Linux/Raspberry Pi
+
+```bash
+git clone <your-repo-url>
 cd "Multivariate Witness Hiding Adaptor Signatures"
 
 cd liboqs
-
-mkdir build
-
-cd build
-
-cmake -DCMAKE_BUILD_TYPE=Release -DOQS_USE_OPENSSL=ON -DOQS_BUILD_ONLY_LIB=ON -DOQS_DIST_BUILD=ON ..
-
+mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release \
+      -DOQS_USE_OPENSSL=ON \
+      -DOQS_BUILD_ONLY_LIB=ON \
+      -DOQS_DIST_BUILD=ON ..
 make -j4
-
 cd ../..
 
-chmod +x build.sh
-
 ./build.sh build
+```
 
-Windows:
+### Windows
+
+```cmd
+git clone <your-repo-url>
+cd "Multivariate Witness Hiding Adaptor Signatures"
 
 cd liboqs
-
 mkdir build
-
 cd build
-
 cmake -DCMAKE_BUILD_TYPE=Release -DOQS_USE_OPENSSL=ON -DOQS_BUILD_ONLY_LIB=ON -DOQS_DIST_BUILD=ON ..
-
 make -j4
-
 cd ../..
 
 build.bat
+```
 
-Individual Test Execution
+### Docker
 
+```bash
+docker-compose up --build
+```
+
+## Testing
+
+### Unit Tests
+
+```bash
 cd build/bin/Unit_Tests
 
-UOV Tests
+# UOV Tests
 ./test_core --scheme UOV --level 128
-
 ./test_core --scheme UOV --level 192
-
 ./test_core --scheme UOV --level 256
 
-MAYO Tests
+# MAYO Tests
 ./test_core --scheme MAYO --level 128
-
 ./test_core --scheme MAYO --level 192
-
 ./test_core --scheme MAYO --level 256
+```
 
-Step 1: Raw Benchmark
+### Integration Tests
 
-Normal Result
+```bash
+cd build/bin/Integration_Tests
+./test_integration
+```
 
-Run raw benchmark first
+### Performance Tests
 
-./build/bin/Performance_Tests/test_bench 
+```bash
+cd build/bin/Performance_Tests
+./test_bench --iterations 1000 --warmup 10 --csv
+```
 
-Rename to raw benchmark
+## Performance Analysis
 
+### Baseline Benchmark
+
+```bash
+./build/bin/Performance_Tests/test_bench
 mv benchmark_results.csv results/performance/raw_bench.csv
+```
 
-Step 2: 30ms Latency Test
+### Latency Testing
 
-Add 30ms latency
+For each latency level (30ms, 120ms, 225ms, 320ms):
 
+```bash
+# Add network latency (Linux only)
 sudo tc qdisc add dev eth0 root netem delay 30ms
 
-Verify latency
-
+# Verify latency
 ping 8.8.8.8
 
-Run benchmark
-
+# Run benchmark
 ./build/bin/Performance_Tests/test_bench --iterations 1000 --warmup 10 --csv
 
-Rename and save
-
+# Save results
 mv benchmark_results.csv results/performance/latency_30ms.csv
 
-Remove latency rule
-
+# Remove latency rule
 sudo tc qdisc del dev eth0 root
+```
 
-Step 3: 120ms Latency Test
+### Analysis Generation
 
-Add 120ms latency
-
-sudo tc qdisc add dev eth0 root netem delay 120ms
-
-Verify latency
-
-ping 8.8.8.8
-
-Run benchmark
-
-./build/bin/Performance_Tests/test_bench --iterations 1000 --warmup 10 --csv
-
-Rename and save
-
-mv benchmark_results.csv results/performance/latency_120ms.csv
-
-Remove latency rule
-
-sudo tc qdisc del dev eth0 root
-
-Step 4: 225ms Latency Test
-
-Add 225ms latency
-
-sudo tc qdisc add dev eth0 root netem delay 225ms
-
-Verify latency
-
-ping 8.8.8.8
-
-Run benchmark
-
-./build/bin/Performance_Tests/test_bench --iterations 1000 --warmup 10 --csv
-
-Rename and save
-
-mv benchmark_results.csv results/performance/latency_225ms.csv
-
-Remove latency rule
-
-sudo tc qdisc del dev eth0 root
-
-Step 5: 320ms Latency Test
-
-Add 320ms latency
-
-sudo tc qdisc add dev eth0 root netem delay 320ms
-
-Verify latency
-
-ping 8.8.8.8
-
-Run benchmark
-
-./build/bin/Performance_Tests/test_bench --iterations 1000 --warmup 10 --csv
-
-Rename and save
-
-mv benchmark_results.csv results/performance/latency_320ms.csv
-
-Remove latency rule
-
-sudo tc qdisc del dev eth0 root
-
-Generate all graphs and analysis
-
+```bash
 python3 analyze_latency_data.py
+```
 
-Expected Output:
+## Configuration
 
-results/performance/
+### Security Levels
 
-raw_bench.csv
-latency_30ms.csv
-latency_120ms.csv
-latency_225ms.csv
-latency_320ms.csv
-latency_analysis.pdf
-latency_analysis.png
-latency_analysis.svg
-degradation_analysis.pdf
-degradation_analysis.png
-degradation_analysis.svg
-operation_breakdown.pdf
-operation_breakdown.png
-operation_breakdown.svg
-throughput_heatmap.pdf
-throughput_heatmap.png
-throughput_heatmap.svg
+- Level 128: NIST Level 1 equivalent
+- Level 192: NIST Level 3 equivalent  
+- Level 256: NIST Level 5 equivalent
+
+### Supported Schemes
+
+- UOV: Unbalanced Oil and Vinegar
+- MAYO: Multivariate Asymmetric Yet Optimized
+
+## Research Context
+
+This implementation is part of ongoing research into post-quantum cryptographic primitives. The adaptor signature functionality enables atomic swaps in blockchain applications, payment channels with dispute resolution, cross-chain interoperability protocols, and privacy-preserving transaction schemes.
+
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Disclaimer
+
+This is a research implementation and should not be used in production systems. The code is provided for educational and research purposes only.
