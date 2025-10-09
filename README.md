@@ -41,6 +41,8 @@ results/
 
 ## Installation
 
+> **Recommended**: We suggest using Linux for the best compatibility and performance. Docker may have limitations with certain cryptographic operations and network latency testing.
+
 ### Linux/Raspberry Pi
 
 ```bash
