@@ -4,7 +4,7 @@
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](build.bat)
 [![Research](https://img.shields.io/badge/type-research-orange.svg)](README.md)
 
-A research implementation of Multivariate Witness Hiding Adaptor Signatures (MWAS) extending UOV and MAYO post-quantum signature schemes with adaptor functionality. This project includes formal construction, security analysis, and empirical performance evaluation across multiple security levels.
+A research implementation of Multivariate Witness Hiding Adaptor Signatures (MWAS) extending UOV and MAYO post-quantum signature schemes with adaptor functionality. 
 
 ## Overview
 
@@ -44,9 +44,11 @@ results/
 ### Linux/Raspberry Pi
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Ash-OblivionKey/multivariate-adaptor-signatures.git
 cd "Multivariate Witness Hiding Adaptor Signatures"
 
+# Clone liboqs dependency
+git clone https://github.com/open-quantum-safe/liboqs.git
 cd liboqs
 mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release \
@@ -62,9 +64,11 @@ cd ../..
 ### Windows
 
 ```cmd
-git clone <your-repo-url>
+git clone https://github.com/Ash-OblivionKey/multivariate-adaptor-signatures.git
 cd "Multivariate Witness Hiding Adaptor Signatures"
 
+# Clone liboqs dependency
+git clone https://github.com/open-quantum-safe/liboqs.git
 cd liboqs
 mkdir build
 cd build
@@ -174,3 +178,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Disclaimer
 
 This is a research implementation and should not be used in production systems. The code is provided for educational and research purposes only.
+
