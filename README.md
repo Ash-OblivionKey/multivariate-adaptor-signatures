@@ -56,6 +56,12 @@ sudo apt update && sudo apt install -y build-essential cmake pkg-config libssl-d
 sudo apt install -y git python3 python3-pip
 
 # Install Python packages for analysis and graph generation
+sudo apt install python3.12-venv
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install numpy pandas matplotlib seaborn
+Or
 pip3 install numpy pandas matplotlib seaborn
 
 git clone https://github.com/Ash-OblivionKey/multivariate-adaptor-signatures.git
