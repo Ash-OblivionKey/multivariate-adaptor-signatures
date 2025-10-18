@@ -41,52 +41,6 @@ results/
 - Docker (optional, for containerized builds)
 
 ### System Setup Commands
-
-#### Ubuntu/Debian
-```bash
-# Update system packages
-sudo apt update && sudo apt upgrade -y
-
-# Install build essentials and dependencies
-sudo apt install -y build-essential cmake git wget curl
-sudo apt install -y libssl-dev pkg-config
-sudo apt install -y python3 python3-pip python3-venv
-sudo apt install -y python3-dev python3-numpy python3-matplotlib
-
-# Install Python packages for graph generation
-pip3 install numpy pandas matplotlib seaborn
-```
-
-#### CentOS/RHEL/Fedora
-```bash
-# Update system packages
-sudo dnf update -y  # or sudo yum update -y for older versions
-
-# Install build essentials and dependencies
-sudo dnf install -y gcc gcc-c++ make cmake git wget curl
-sudo dnf install -y openssl-devel pkgconfig
-sudo dnf install -y python3 python3-pip python3-devel
-sudo dnf install -y numpy matplotlib
-
-# Install Python packages for graph generation
-pip3 install pandas seaborn
-```
-
-#### Arch Linux
-```bash
-# Update system packages
-sudo pacman -Syu
-
-# Install build essentials and dependencies
-sudo pacman -S base-devel cmake git wget curl
-sudo pacman -S openssl pkgconf
-sudo pacman -S python python-pip
-sudo pacman -S python-numpy python-matplotlib
-
-# Install Python packages for graph generation
-pip install pandas seaborn
-```
-
 ## Installation
 
 > **Recommended**: We suggest using Linux for the best compatibility and performance. Docker may have limitations with certain cryptographic operations and network latency testing.
@@ -142,20 +96,6 @@ cd ../..
 
 build.bat
 ```
-
-**Alternative for Windows (if Visual Studio not available):**
-```cmd
-# Install MinGW-w64 or use Git Bash with make
-cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DOQS_USE_OPENSSL=ON -DOQS_BUILD_ONLY_LIB=ON -DOQS_DIST_BUILD=ON ..
-mingw32-make -j4
-```
-
-### Docker
-
-```bash
-docker-compose up --build
-```
-
 ## Troubleshooting
 
 ### Common Build Issues
@@ -242,8 +182,8 @@ cd build/bin/Integration_Tests
 ./test_integration
 ```
 
-### Performance Tests
-
+### Performance Tests 
+## To Get Paper Results Use Commands Onwards
 ```bash
 cd build/bin/Performance_Tests
 ./test_bench --iterations 1000 --warmup 10 --csv
