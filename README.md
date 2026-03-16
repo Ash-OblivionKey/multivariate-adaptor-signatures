@@ -1,9 +1,5 @@
 # Multivariate Witness Hiding Adaptor Signatures (MWAS)
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](build.bat)
-[![Research](https://img.shields.io/badge/type-research-orange.svg)](README.md)
-
 A research implementation of Multivariate Witness Hiding Adaptor Signatures (MWAS) extending UOV and MAYO post-quantum signature schemes with adaptor functionality. 
 
 ## Overview
