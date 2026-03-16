@@ -259,11 +259,6 @@ The analysis script automatically:
 
 This implementation is part of ongoing research into post-quantum cryptographic primitives. The adaptor signature functionality enables atomic swaps in blockchain applications, payment channels with dispute resolution, cross-chain interoperability protocols, and privacy-preserving transaction schemes.
 
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
 ## Disclaimer
 
 This is a research implementation and should not be used in production systems. The code is provided for educational and research purposes only.
