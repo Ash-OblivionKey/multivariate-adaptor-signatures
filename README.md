@@ -263,12 +263,16 @@ This implementation is part of ongoing research into post-quantum cryptographic 
 
 This is a research implementation and should not be used in production systems. The code is provided for educational and research purposes only.
 
+## Citation
 
+If you use this work, please cite:
+
+```bibtex
 @misc{cryptoeprint:2026/690,
-      author = {Ayush Meshram and Ayush Banerjee},
-      title = {Multivariate Witness-Hiding Adaptor Signatures},
-      howpublished = {Cryptology {ePrint} Archive, Paper 2026/690},
-      year = {2026},
-      url = {https://eprint.iacr.org/2026/690}
+  author = {Ayush Meshram and Ayush Banerjee},
+  title = {Multivariate Witness-Hiding Adaptor Signatures},
+  howpublished = {Cryptology {ePrint} Archive, Paper 2026/690},
+  year = {2026},
+  url = {https://eprint.iacr.org/2026/690}
 }
-
+```
