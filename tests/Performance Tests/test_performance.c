@@ -250,8 +250,8 @@ static const char *select_sig_alg(adaptor_scheme_type_t scheme, uint32_t level) 
     const char *prefer = NULL;
     if (scheme == ADAPTOR_SCHEME_UOV) {
         if (level == 128) prefer = "OV-Is";
-        else if (level == 192) prefer = "OV-Ip";
-        else if (level == 256) prefer = "OV-III";
+        else if (level == 192) prefer = "OV-III";
+        else if (level == 256) prefer = "OV-V";
         else prefer = "OV-";
     } else {
         if (level == 128) prefer = "MAYO-1";

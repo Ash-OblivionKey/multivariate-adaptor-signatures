@@ -229,9 +229,11 @@ static const char *select_sig_alg(adaptor_scheme_type_t scheme, uint32_t level) 
     int n = OQS_SIG_alg_count();
     const char *prefer = NULL;
     if (scheme == ADAPTOR_SCHEME_UOV) {
+        /* NIST-aligned: ov-Is = Level I, ov-III = Level III, ov-V = Level V.
+         * ov-Ip is a second Level-I set and is covered by test_bench's 7-config suite. */
         if (level == 128) prefer = "ov-is";
-        else if (level == 192) prefer = "ov-ip";
-        else if (level == 256) prefer = "ov-iii";
+        else if (level == 192) prefer = "ov-iii";
+        else if (level == 256) prefer = "ov-v";
         else prefer = "ov-";
     } else {
         if (level == 128) prefer = "mayo-1";

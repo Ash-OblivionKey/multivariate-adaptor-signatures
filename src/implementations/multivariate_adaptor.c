@@ -76,6 +76,81 @@ static double get_current_time_ms(void) {
 #define ADAPTOR_DEBUG 0
 
 // ============================================================================
+// §4 length-prefixed encoding: ⟨s⟩ = len₄(s) ‖ s  (4-byte big-endian length)
+// ============================================================================
+
+static void adaptor_store_be32(uint8_t out[ADAPTOR_LEN_PREFIX_SIZE], uint32_t v) {
+    out[0] = (uint8_t)(v >> 24);
+    out[1] = (uint8_t)(v >> 16);
+    out[2] = (uint8_t)(v >> 8);
+    out[3] = (uint8_t)v;
+}
+
+static size_t adaptor_lp_size(size_t n) {
+    return ADAPTOR_LEN_PREFIX_SIZE + n;
+}
+
+static int adaptor_append_lp(uint8_t* buf, size_t cap, size_t* off,
+                             const void* s, size_t slen) {
+    if (!buf || !off || (slen > 0 && !s) || slen > 0xFFFFFFFFu) {
+        return -1;
+    }
+    size_t need = adaptor_lp_size(slen);
+    if (*off > cap || need > cap - *off) {
+        return -1;
+    }
+    adaptor_store_be32(buf + *off, (uint32_t)slen);
+    *off += ADAPTOR_LEN_PREFIX_SIZE;
+    if (slen > 0) {
+        memcpy(buf + *off, s, slen);
+        *off += slen;
+    }
+    return 0;
+}
+
+/* h_m = SHA256(⟨m⟩ ‖ ⟨Y⟩ ‖ ⟨PRESIGN⟩) — used by PreSign / PreVerify / Verify. */
+static int adaptor_compute_presign_message_hash(uint8_t out_hash[ADAPTOR_HASH_SIZE],
+                                                const uint8_t* message, size_t message_len,
+                                                const uint8_t* statement_y, size_t y_len) {
+    if (!out_hash || !message || !statement_y || y_len != ADAPTOR_STATEMENT_SIZE) {
+        return ADAPTOR_ERROR_NULL_POINTER;
+    }
+    if (message_len == 0 || message_len > ADAPTOR_MAX_MESSAGE_SIZE) {
+        return ADAPTOR_ERROR_INVALID_MESSAGE;
+    }
+    const char* label = ADAPTOR_PRESIGN_LABEL;
+    size_t label_len = strlen(label);
+    size_t total = adaptor_lp_size(message_len) + adaptor_lp_size(y_len) + adaptor_lp_size(label_len);
+    uint8_t* buf = malloc(total);
+    if (!buf) {
+        return ADAPTOR_ERROR_MEMORY_ALLOCATION;
+    }
+    size_t off = 0;
+    if (adaptor_append_lp(buf, total, &off, message, message_len) != 0 ||
+        adaptor_append_lp(buf, total, &off, statement_y, y_len) != 0 ||
+        adaptor_append_lp(buf, total, &off, label, label_len) != 0 ||
+        off != total) {
+        OPENSSL_cleanse(buf, total);
+        free(buf);
+        return ADAPTOR_ERROR_INTERNAL;
+    }
+    SHA256(buf, total, out_hash);
+    OPENSSL_cleanse(buf, total);
+    free(buf);
+    return ADAPTOR_SUCCESS;
+}
+
+/* Expected |w| = 2λ bytes (single source of truth for param validators). */
+static uint32_t adaptor_expected_witness_bytes(uint32_t security_level) {
+    switch (security_level) {
+        case 128: return 32;
+        case 192: return 48;
+        case 256: return 64;
+        default: return 0;
+    }
+}
+
+// ============================================================================
 // ENHANCED ERROR HANDLING AND EDGE CASE COVERAGE
 // ============================================================================
 
@@ -318,14 +393,14 @@ static bool adaptor_validate_all_inputs_comprehensive(const adaptor_context_t* c
 // PARAMETER MANAGEMENT
 // ============================================================================
 
-// Pre-defined UOV adaptor parameters for different security levels
-// Based on liboqs UOV implementations: OV-Is (128-bit), OV-Ip (192-bit), OV-III (256-bit)
-// Witness sizes are protocol-chosen values for the adaptor witness (NOT liboqs secret key sizes)
-// The witness is the application-defined secret that opens the public statement
+// Pre-defined UOV adaptor parameters (NIST-aligned liboqs mapping):
+//   λ=128 → OV-Is (Level I); λ=192 → OV-III (Level III); λ=256 → OV-V (Level V).
+// OV-Ip is also Level I; the bench suite runs it as an extra Level-I variant with the same
+// witness length. Witness length is unified to 2λ bytes (NOT liboqs secret-key size).
 static const adaptor_params_t adaptor_params_uov_128 = {
     .security_level = ADAPTOR_SECURITY_LEVEL_128,
     .commitment_size = ADAPTOR_STATEMENT_SIZE,  // Key + HMAC size (64 bytes)
-    .witness_size = 48,                         // Witness size for OV-Is (protocol-chosen)
+    .witness_size = 32,                         // 2λ bytes for λ=128
     .hash_size = ADAPTOR_HASH_SIZE,             // SHA256 output size (32 bytes)
     .scheme = ADAPTOR_SCHEME_UOV,
     .witness_hiding = true,                     // Witness hiding property
@@ -336,7 +411,7 @@ static const adaptor_params_t adaptor_params_uov_128 = {
 static const adaptor_params_t adaptor_params_uov_192 = {
     .security_level = ADAPTOR_SECURITY_LEVEL_192,
     .commitment_size = ADAPTOR_STATEMENT_SIZE,  // Key + HMAC size (64 bytes)
-    .witness_size = 64,                         // Witness size for OV-Ip (protocol-chosen)
+    .witness_size = 48,                         // 2λ bytes for λ=192
     .hash_size = ADAPTOR_HASH_SIZE,             // SHA256 output size
     .scheme = ADAPTOR_SCHEME_UOV,
     .witness_hiding = true,
@@ -347,7 +422,7 @@ static const adaptor_params_t adaptor_params_uov_192 = {
 static const adaptor_params_t adaptor_params_uov_256 = {
     .security_level = ADAPTOR_SECURITY_LEVEL_256,
     .commitment_size = ADAPTOR_STATEMENT_SIZE,  // Key + HMAC size (64 bytes)
-    .witness_size = 80,                         // Witness size for OV-III (protocol-chosen)
+    .witness_size = 64,                         // 2λ bytes for λ=256
     .hash_size = ADAPTOR_HASH_SIZE,             // SHA256 output size
     .scheme = ADAPTOR_SCHEME_UOV,
     .witness_hiding = true,
@@ -355,13 +430,11 @@ static const adaptor_params_t adaptor_params_uov_256 = {
     .presignature_unforgeable = true
 };
 
-// Pre-defined MAYO adaptor parameters for different security levels
-// Based on liboqs MAYO implementations: MAYO-1 (128-bit), MAYO-2 (128-bit), MAYO-3 (192-bit), MAYO-5 (256-bit)
-// Witness sizes are protocol-chosen values for the adaptor witness (NOT liboqs secret key sizes)
+// Pre-defined MAYO adaptor parameters: MAYO-1/3/5 at λ=128/192/256 with witness length 2λ.
 static const adaptor_params_t adaptor_params_mayo_1 = {
     .security_level = ADAPTOR_SECURITY_LEVEL_128,
     .commitment_size = ADAPTOR_STATEMENT_SIZE,  // Key + HMAC size (64 bytes)
-    .witness_size = 24,                         // Witness size for MAYO-1 (protocol-chosen)
+    .witness_size = 32,                         // 2λ bytes for λ=128
     .hash_size = ADAPTOR_HASH_SIZE,             // SHA256 output size
     .scheme = ADAPTOR_SCHEME_MAYO,
     .witness_hiding = true,
@@ -373,7 +446,7 @@ static const adaptor_params_t adaptor_params_mayo_1 = {
 static const adaptor_params_t adaptor_params_mayo_3 = {
     .security_level = ADAPTOR_SECURITY_LEVEL_192,
     .commitment_size = ADAPTOR_STATEMENT_SIZE,  // Key + HMAC size (64 bytes)
-    .witness_size = 32,                         // Witness size for MAYO-3 (protocol-chosen)
+    .witness_size = 48,                         // 2λ bytes for λ=192
     .hash_size = ADAPTOR_HASH_SIZE,             // SHA256 output size
     .scheme = ADAPTOR_SCHEME_MAYO,
     .witness_hiding = true,
@@ -384,7 +457,7 @@ static const adaptor_params_t adaptor_params_mayo_3 = {
 static const adaptor_params_t adaptor_params_mayo_5 = {
     .security_level = ADAPTOR_SECURITY_LEVEL_256,
     .commitment_size = ADAPTOR_STATEMENT_SIZE,  // Key + HMAC size (64 bytes)
-    .witness_size = 40,                         // Witness size for MAYO-5 (protocol-chosen)
+    .witness_size = 64,                         // 2λ bytes for λ=256
     .hash_size = ADAPTOR_HASH_SIZE,             // SHA256 output size
     .scheme = ADAPTOR_SCHEME_MAYO,
     .witness_hiding = true,
@@ -438,43 +511,14 @@ bool adaptor_validate_params_detailed(const adaptor_params_t* params, adaptor_er
         return false;
     }
     
-    // Validate witness size based on security level and scheme
-    // Witness sizes are protocol-chosen values (NOT liboqs secret key sizes)
-    uint32_t min_witness_size, max_witness_size;
-    switch (params->security_level) {
-        case 128:
-            if (params->scheme == ADAPTOR_SCHEME_MAYO) {
-                min_witness_size = 24;  // MAYO-1 uses 24 bytes (protocol-chosen)
-                max_witness_size = 24;
-            } else {
-                min_witness_size = 48;  // UOV-Is uses 48 bytes (protocol-chosen)
-                max_witness_size = 48;
-            }
-            break;
-        case 192:
-            if (params->scheme == ADAPTOR_SCHEME_MAYO) {
-                min_witness_size = 32;  // MAYO-3 uses 32 bytes (protocol-chosen)
-                max_witness_size = 32;
-            } else {
-                min_witness_size = 64;  // UOV-Ip uses 64 bytes (protocol-chosen)
-                max_witness_size = 64;
-            }
-            break;
-        case 256:
-            if (params->scheme == ADAPTOR_SCHEME_MAYO) {
-                min_witness_size = 40;  // MAYO-5 uses 40 bytes (protocol-chosen)
-                max_witness_size = 40;
-            } else {
-                min_witness_size = 80;  // UOV-III uses 80 bytes (protocol-chosen)
-                max_witness_size = 80;
-            }
-            break;
-        default:
-            if (error_code) *error_code = ADAPTOR_ERROR_INVALID_SECURITY_LEVEL;
-            return false;
+    // Witness length is unified to 2λ bytes for every scheme (NOT liboqs secret-key size).
+    uint32_t expected_witness_size = adaptor_expected_witness_bytes(params->security_level);
+    if (expected_witness_size == 0) {
+        if (error_code) *error_code = ADAPTOR_ERROR_INVALID_SECURITY_LEVEL;
+        return false;
     }
     
-    if (params->witness_size < min_witness_size || params->witness_size > max_witness_size) {
+    if (params->witness_size != expected_witness_size) {
         if (error_code) *error_code = ADAPTOR_ERROR_INVALID_PARAMS;
         return false;
     }
@@ -542,109 +586,82 @@ const char* adaptor_get_error_string(adaptor_error_t error_code) {
 
 int adaptor_generate_statement_from_witness(const uint8_t* witness, size_t witness_len,
                                            uint8_t* statement_c, size_t c_len) {
-    // Comprehensive input validation
     if (!witness || !statement_c) {
         return ADAPTOR_ERROR_NULL_POINTER;
     }
-    
     if (witness_len == 0 || witness_len > ADAPTOR_MAX_WITNESS_SIZE) {
         return ADAPTOR_ERROR_INVALID_INPUT_SIZE;
     }
-    
     if (c_len != ADAPTOR_STATEMENT_SIZE) {
         return ADAPTOR_ERROR_INVALID_INPUT_SIZE;
     }
-    
-    // CRITICAL FIX: Implement proper witness hiding using HMAC-SHA256 with random key
-    // This provides computational hiding: c = HMAC-SHA256(random_key, "ADAPTORv1" || w)
-    // The random commitment key provides the hiding property required for witness hiding
-    
-    // CRITICAL FIX: Use simple SHA256-based key derivation to avoid HKDF hanging issues
-    // This maintains witness hiding while being more reliable for multiple iterations
-    uint8_t commitment_key[ADAPTOR_COMMITMENT_KEY_SIZE];
-    
-    // Use simple SHA256-based key derivation to avoid OpenSSL HKDF issues
-    const char* salt = "ADAPTOR_COMMITMENT_SALT_v1";
+
+    /* Paper GenerateStatement:
+     *   k := SHA256(⟨SALT⟩ ‖ ⟨w⟩)
+     *   h_com := HMAC_k(⟨ADAPTORv1⟩ ‖ ⟨w⟩)
+     *   Y := k ‖ h_com
+     */
+    const char* salt = ADAPTOR_COMMITMENT_SALT;
     size_t salt_len = strlen(salt);
-    
-    // Create input: salt || witness
-    size_t kdf_input_size = salt_len + witness_len;
-    uint8_t* kdf_input = malloc(kdf_input_size);
+    size_t kdf_size = adaptor_lp_size(salt_len) + adaptor_lp_size(witness_len);
+    uint8_t* kdf_input = malloc(kdf_size);
     if (!kdf_input) {
         return ADAPTOR_ERROR_MEMORY_ALLOCATION;
     }
-    
-    memcpy(kdf_input, salt, salt_len);
-    memcpy(kdf_input + salt_len, witness, witness_len);
-    
-    // Use SHA256 for key derivation
-    SHA256(kdf_input, kdf_input_size, commitment_key);
-    
-    // Clean up
-    OPENSSL_cleanse(kdf_input, kdf_input_size);
+    size_t off = 0;
+    if (adaptor_append_lp(kdf_input, kdf_size, &off, salt, salt_len) != 0 ||
+        adaptor_append_lp(kdf_input, kdf_size, &off, witness, witness_len) != 0) {
+        OPENSSL_cleanse(kdf_input, kdf_size);
+        free(kdf_input);
+        return ADAPTOR_ERROR_INTERNAL;
+    }
+
+    uint8_t commitment_key[ADAPTOR_COMMITMENT_KEY_SIZE];
+    SHA256(kdf_input, kdf_size, commitment_key);
+    OPENSSL_cleanse(kdf_input, kdf_size);
     free(kdf_input);
-    
-    // Store the commitment key in the statement for later verification
-    // We'll prepend the key to the commitment: statement = key || HMAC(key, "ADAPTORv1" || w)
-    uint8_t commitment[ADAPTOR_COMMITMENT_MAC_SIZE];
+
     const char* domain_sep = ADAPTOR_DS;
     size_t domain_sep_len = strlen(domain_sep);
-    // CRITICAL FIX: Use constant input size for timing attack resistance
-    // Pad to maximum witness size (80 bytes for UOV-III) to ensure constant-time execution
-    size_t hmac_input_size = domain_sep_len + ADAPTOR_MAX_WITNESS_BUFFER_SIZE;
-    uint8_t* hmac_input = malloc(hmac_input_size);
+    size_t hmac_size = adaptor_lp_size(domain_sep_len) + adaptor_lp_size(witness_len);
+    uint8_t* hmac_input = malloc(hmac_size);
     if (!hmac_input) {
+        OPENSSL_cleanse(commitment_key, sizeof(commitment_key));
         return ADAPTOR_ERROR_MEMORY_ALLOCATION;
     }
-    
-    // Copy domain separator
-    memcpy(hmac_input, domain_sep, domain_sep_len);
-    // Copy witness and pad with zeros for constant-time execution
-    memcpy(hmac_input + domain_sep_len, witness, witness_len);
-    // Zero-pad the remaining bytes for constant-time execution
-    memset(hmac_input + domain_sep_len + witness_len, 0, ADAPTOR_MAX_WITNESS_BUFFER_SIZE - witness_len);
-    
-    // Generate HMAC-SHA256 commitment for witness hiding
+    off = 0;
+    if (adaptor_append_lp(hmac_input, hmac_size, &off, domain_sep, domain_sep_len) != 0 ||
+        adaptor_append_lp(hmac_input, hmac_size, &off, witness, witness_len) != 0) {
+        OPENSSL_cleanse(hmac_input, hmac_size);
+        free(hmac_input);
+        OPENSSL_cleanse(commitment_key, sizeof(commitment_key));
+        return ADAPTOR_ERROR_INTERNAL;
+    }
+
+    uint8_t commitment[ADAPTOR_COMMITMENT_MAC_SIZE];
     unsigned int hmac_len = 0;
-    
-    // CRITICAL FIX: Add timeout protection for HMAC computation
-    // This prevents hanging on systems with OpenSSL issues
     const EVP_MD* md = EVP_sha256();
     if (md == NULL) {
-        OPENSSL_cleanse(hmac_input, hmac_input_size);
-        OPENSSL_cleanse(commitment_key, ADAPTOR_COMMITMENT_KEY_SIZE);
+        OPENSSL_cleanse(hmac_input, hmac_size);
         free(hmac_input);
+        OPENSSL_cleanse(commitment_key, sizeof(commitment_key));
         return ADAPTOR_ERROR_OPENSSL_ERROR;
     }
-    
-    const uint8_t* hmac_result = HMAC(md, commitment_key, ADAPTOR_COMMITMENT_KEY_SIZE, 
-                                      hmac_input, hmac_input_size, commitment, &hmac_len);
-    
-    if (hmac_result == NULL) {
-        OPENSSL_cleanse(hmac_input, hmac_input_size);
-        OPENSSL_cleanse(commitment_key, ADAPTOR_COMMITMENT_KEY_SIZE);
-        free(hmac_input);
+    const uint8_t* hmac_result = HMAC(md, commitment_key, ADAPTOR_COMMITMENT_KEY_SIZE,
+                                      hmac_input, hmac_size, commitment, &hmac_len);
+    OPENSSL_cleanse(hmac_input, hmac_size);
+    free(hmac_input);
+
+    if (hmac_result == NULL || hmac_len != ADAPTOR_COMMITMENT_MAC_SIZE) {
+        OPENSSL_cleanse(commitment_key, sizeof(commitment_key));
+        OPENSSL_cleanse(commitment, sizeof(commitment));
         return ADAPTOR_ERROR_OPENSSL_ERROR;
     }
-    
-    // Validate HMAC output length
-    if (hmac_len != ADAPTOR_COMMITMENT_MAC_SIZE) {
-        OPENSSL_cleanse(hmac_input, hmac_input_size);
-        OPENSSL_cleanse(commitment_key, ADAPTOR_COMMITMENT_KEY_SIZE);
-        free(hmac_input);
-        return ADAPTOR_ERROR_OPENSSL_ERROR;
-    }
-    
-    // Store key || commitment in the statement (64 bytes total)
+
     memcpy(statement_c, commitment_key, ADAPTOR_COMMITMENT_KEY_SIZE);
     memcpy(statement_c + ADAPTOR_COMMITMENT_KEY_SIZE, commitment, ADAPTOR_COMMITMENT_MAC_SIZE);
-    
-    // Securely clear sensitive data
-    OPENSSL_cleanse(hmac_input, hmac_input_size);
-    OPENSSL_cleanse(commitment_key, ADAPTOR_COMMITMENT_KEY_SIZE);
-    OPENSSL_cleanse(commitment, ADAPTOR_COMMITMENT_MAC_SIZE);
-    free(hmac_input);
-    
+    OPENSSL_cleanse(commitment_key, sizeof(commitment_key));
+    OPENSSL_cleanse(commitment, sizeof(commitment));
     return ADAPTOR_SUCCESS;
 }
 
@@ -659,33 +676,33 @@ int adaptor_generate_statement_from_witness(const uint8_t* witness, size_t witne
 // LIBOQS UOV INTEGRATION
 // ============================================================================
 
-// Map security levels to liboqs UOV algorithm names
-// Based on liboqs UOV implementations: Is, Ip, III, V
-// Using optimized variants for better performance
+// Map security levels to default liboqs UOV algorithm names (NIST-aligned).
+// OV-Ip (also Level I) requires adaptor_context_set_oqs_algorithm().
 static const char* get_uov_algorithm_name(uint32_t security_level) {
     switch (security_level) {
-        case 128: return OQS_SIG_alg_uov_ov_Is;      // 128-bit security: OV-Is
-        case 192: return OQS_SIG_alg_uov_ov_Ip;      // 192-bit security: OV-Ip (FIXED)
-        case 256: return OQS_SIG_alg_uov_ov_III;     // 256-bit security: OV-III
+        case 128: return OQS_SIG_alg_uov_ov_Is;      // NIST Level I: OV-Is
+        case 192: return OQS_SIG_alg_uov_ov_III;     // NIST Level III: OV-III
+#ifdef OQS_SIG_alg_uov_ov_V
+        case 256: return OQS_SIG_alg_uov_ov_V;       // NIST Level V: OV-V
+#else
+        case 256: return NULL; /* ov-V not present in this liboqs header/build */
+#endif
         default: return NULL;
     }
 }
 
 // Map security levels to liboqs MAYO algorithm names
-// Based on liboqs MAYO implementations: MAYO-1, MAYO-2, MAYO-3, MAYO-5
 static const char* get_mayo_algorithm_name(uint32_t security_level) {
     switch (security_level) {
-        case 128: return OQS_SIG_alg_mayo_1;         // 128-bit security: MAYO-1
-        case 192: return OQS_SIG_alg_mayo_3;         // 192-bit security: MAYO-3
-        case 256: return OQS_SIG_alg_mayo_5;         // 256-bit security: MAYO-5
+        case 128: return OQS_SIG_alg_mayo_1;
+        case 192: return OQS_SIG_alg_mayo_3;
+        case 256: return OQS_SIG_alg_mayo_5;
         default: return NULL;
     }
 }
 
-// Get algorithm name based on scheme and security level with validation
 static const char* get_algorithm_name(adaptor_scheme_type_t scheme, uint32_t security_level) {
     const char* alg_name = NULL;
-    
     switch (scheme) {
         case ADAPTOR_SCHEME_UOV:
             alg_name = get_uov_algorithm_name(security_level);
@@ -696,41 +713,41 @@ static const char* get_algorithm_name(adaptor_scheme_type_t scheme, uint32_t sec
         default:
             return NULL;
     }
-    
-    // CRITICAL FIX: Skip algorithm validation to avoid potential hanging issues
-    // The algorithm names are hardcoded and should be valid
-    // if (alg_name && !OQS_SIG_alg_is_enabled(alg_name)) {
-    //     return NULL;
-    // }
-    
+    if (alg_name && !OQS_SIG_alg_is_enabled(alg_name)) {
+        return NULL;
+    }
     return alg_name;
+}
+
+static const char* get_context_algorithm_name(const adaptor_context_t* ctx) {
+    if (!ctx) return NULL;
+    if (ctx->oqs_algorithm) {
+        if (!OQS_SIG_alg_is_enabled(ctx->oqs_algorithm)) {
+            return NULL;
+        }
+        return ctx->oqs_algorithm;
+    }
+    return get_algorithm_name(ctx->params.scheme, ctx->params.security_level);
 }
 
 /**
  * Get or create cached signature object for constant-time verification
- * This prevents timing attacks by avoiding per-verification object creation
  */
 static OQS_SIG* get_cached_signature_object(adaptor_context_t* ctx) {
     if (!ctx) {
         return NULL;
     }
-    
-    // Return cached object if it exists
     if (ctx->cached_sig_obj) {
         return (OQS_SIG*)ctx->cached_sig_obj;
     }
-    
-    // Create and cache new signature object
-    const char* alg_name = get_algorithm_name(ctx->params.scheme, ctx->params.security_level);
+    const char* alg_name = get_context_algorithm_name(ctx);
     if (!alg_name) {
         return NULL;
     }
-    
     OQS_SIG* sig_obj = OQS_SIG_new(alg_name);
     if (sig_obj) {
         ctx->cached_sig_obj = sig_obj;
     }
-    
     return sig_obj;
 }
 
@@ -809,34 +826,51 @@ int adaptor_presignature_verify(const adaptor_presignature_t* presig,
         return param_error;
     }
     
-    // Step 1: Verify commitment structure and format
+    // Step 1: |Y| must be exactly 64 bytes (key[32] || HMAC[32])
     if (presig->commitment_size != ADAPTOR_STATEMENT_SIZE) {
         return ADAPTOR_ERROR_INVALID_SIGNATURE;
     }
-    
-    // Step 2: Verify that the pre-signature is incomplete (cannot be verified as regular signature)
-    // This is the key property of adaptor signatures - the pre-signature must be incomplete
-    if (!adaptor_verify_presignature_incomplete(presig, ctx, message, message_len)) {
-        return ADAPTOR_ERROR_INVALID_SIGNATURE;
-    }
-    
-    // Step 3: Verify commitment structure: must be exactly 64 bytes (32 key + 32 HMAC)
-    const uint8_t* commitment_key = presig->commitment;
-    const uint8_t* commitment_hmac = presig->commitment + ADAPTOR_COMMITMENT_KEY_SIZE;
-    
-    // Step 4: Verify commitment format (basic structure validation)
-    // The commitment should be properly formatted as key[32] || HMAC[32]
-    if (commitment_key == NULL || commitment_hmac == NULL) {
-        return ADAPTOR_ERROR_INVALID_SIGNATURE;
-    }
-    
-    // Step 5: Verify message hash consistency
-    // The message hash should be consistent with the original message
     if (presig->message_hash_size != ADAPTOR_HASH_SIZE) {
         return ADAPTOR_ERROR_INVALID_SIGNATURE;
     }
-    
-    // All validation checks passed - the pre-signature is properly formed and incomplete
+
+    /* Step 2 (Alg. 7): h'_m = SHA256(<m> || <Y> || <PRESIGN>) must equal the cached h_m. */
+    uint8_t expected_hash[ADAPTOR_HASH_SIZE];
+    if (adaptor_compute_presign_message_hash(expected_hash, message, message_len,
+                                             presig->commitment, presig->commitment_size)
+        != ADAPTOR_SUCCESS) {
+        return ADAPTOR_ERROR_CRYPTO_OPERATION;
+    }
+    int hash_mismatch = OQS_MEM_secure_bcmp(expected_hash, presig->message_hash, ADAPTOR_HASH_SIZE);
+    if (hash_mismatch != 0) {
+        OPENSSL_cleanse(expected_hash, sizeof(expected_hash));
+        return ADAPTOR_ERROR_INVALID_SIGNATURE;
+    }
+
+    /* Step 3 (Alg. 7): sigma' must verify under Sigma on h_m. Without this a
+     * garbage sigma' would pass PreVerify, breaking Lemma (pre-verify soundness)
+     * and Theorem (adaptation soundness). */
+    OQS_SIG* sig_obj = get_cached_signature_object((adaptor_context_t*)ctx);
+    if (sig_obj == NULL) {
+        OPENSSL_cleanse(expected_hash, sizeof(expected_hash));
+        return ADAPTOR_ERROR_LIBOQS_ERROR;
+    }
+    OQS_STATUS verify_status = OQS_SIG_verify(sig_obj, expected_hash, ADAPTOR_HASH_SIZE,
+                                             presig->signature, presig->signature_size,
+                                             (const uint8_t*)ctx->public_key);
+    OPENSSL_cleanse(expected_hash, sizeof(expected_hash));
+    if (verify_status != OQS_SUCCESS) {
+        return ADAPTOR_ERROR_VERIFICATION_FAILED;
+    }
+
+#if ADAPTOR_PREVERIFY_SELFTEST
+    /* Optional: also confirm sigma' does not verify without <PRESIGN>. Costs a second
+     * OQS_SIG_verify, so it is off in benchmarked builds. */
+    if (!adaptor_verify_presignature_incomplete(presig, ctx, message, message_len)) {
+        return ADAPTOR_ERROR_INVALID_SIGNATURE;
+    }
+#endif
+
     return ADAPTOR_SUCCESS;
 }
 
@@ -866,6 +900,13 @@ int adaptor_presignature_cleanup(adaptor_presignature_t* presig) {
         presig->signature = NULL;
         presig->signature_size = 0;
     }
+
+    if (presig->randomness) {
+        OPENSSL_cleanse(presig->randomness, presig->randomness_size);
+        free(presig->randomness);
+        presig->randomness = NULL;
+        presig->randomness_size = 0;
+    }
     
     // Zeroize the entire structure
     presig->security_level = 0;
@@ -876,12 +917,21 @@ int adaptor_presignature_cleanup(adaptor_presignature_t* presig) {
 
 size_t adaptor_presignature_size(const adaptor_presignature_t* presig) {
     if (!presig) return 0;
-    
-    // Calculate serialized size: metadata + data (no randomness needed)
-    return sizeof(uint32_t) * 4 + // security_level, commitment_size, signature_size, message_hash_size
-           presig->commitment_size + 
-           presig->signature_size + 
-           presig->message_hash_size;
+    /* Wire/reported |σ̂| = |σ'| only (matches Tables 2–3 / CSV SigmaPrime_Bytes).
+     * Y and cached h_m stay in the in-memory object for PreVerify but are not
+     * part of the published pre-signature length. */
+    return presig->signature_size;
+}
+
+int adaptor_presignature_assert_incomplete(const adaptor_presignature_t* presig,
+                                           const adaptor_context_t* ctx,
+                                           const uint8_t* message, size_t message_len) {
+    if (!presig || !ctx || !message) {
+        return ADAPTOR_ERROR_NULL_POINTER;
+    }
+    return adaptor_verify_presignature_incomplete(presig, ctx, message, message_len)
+               ? ADAPTOR_SUCCESS
+               : ADAPTOR_ERROR_CRYPTO_OPERATION;
 }
 
 // ============================================================================
@@ -922,6 +972,22 @@ int adaptor_signature_complete(adaptor_signature_t* sig,
     return adaptor_complete_signature_with_witness(sig, presig, witness, witness_len);
 }
 
+int adaptor_signature_adapt(adaptor_signature_t* sig,
+                            const adaptor_presignature_t* presig,
+                            const adaptor_context_t* ctx,
+                            const uint8_t* message, size_t message_len,
+                            const uint8_t* witness, size_t witness_len) {
+    if (!sig || !presig || !ctx || !message || !witness) {
+        return ADAPTOR_ERROR_NULL_POINTER;
+    }
+    /* Alg. 7 Adapt: reject unless PreVerify(pk, m, presig) = 1. */
+    int preverify_rc = adaptor_presignature_verify(presig, ctx, message, message_len);
+    if (preverify_rc != ADAPTOR_SUCCESS) {
+        return preverify_rc;
+    }
+    return adaptor_complete_signature_with_witness(sig, presig, witness, witness_len);
+}
+
 int adaptor_signature_verify(const adaptor_signature_t* sig,
                              const adaptor_context_t* ctx,
                              const uint8_t* message, size_t message_len) {
@@ -957,21 +1023,21 @@ int adaptor_signature_verify(const adaptor_signature_t* sig,
         return ADAPTOR_ERROR_CRYPTO_OPERATION;
     }
     
-    // Validate signature structure
-    if (!sig->witness || sig->witness_size == 0 || 
-        !sig->presignature.commitment || !sig->presignature.signature) {
+    // Validate signature structure: need w and σ' (from σ = σ'‖w). Embedded Y from ĥσ is optional.
+    if (!sig->witness || sig->witness_size == 0) {
+        return ADAPTOR_ERROR_INVALID_SIGNATURE;
+    }
+    if ((!sig->presignature.signature || sig->presignature.signature_size == 0) &&
+        (!sig->signature || sig->signature_size <= sig->witness_size)) {
         return ADAPTOR_ERROR_INVALID_SIGNATURE;
     }
     
     // Validate signature sizes
-    if (sig->signature_size == 0 || sig->presignature.signature_size == 0) {
+    if (sig->signature_size == 0 && sig->presignature.signature_size == 0) {
         return ADAPTOR_ERROR_INVALID_SIGNATURE;
     }
     
-    // Verify protocol compliance
-    if (!adaptor_verify_protocol_compliance(&sig->presignature, sig)) {
-        return ADAPTOR_ERROR_INVALID_SIGNATURE;
-    }
+    /* Skip protocol_compliance's commitment cross-check: Verify(pk,m,σ) must not need ĥσ. */
     
 #if ADAPTOR_DEBUG
     printf("Verifying NEW adaptor signature using liboqs %s...\n", 
@@ -980,103 +1046,44 @@ int adaptor_signature_verify(const adaptor_signature_t* sig,
     printf("    Signature size: %zu bytes\n", sig->signature_size);
 #endif
     
-    // Step 1: Verify witness-commitment binding
-    // This ensures the witness matches the commitment in the presignature
-    if (!sig->presignature.commitment || sig->presignature.commitment_size != ADAPTOR_STATEMENT_SIZE) {
+    /* Paper Verify(pk, m, σ): parse σ = σ'‖w; Y ← GenerateStatement(pk,w) from w alone;
+     * h_m ← SHA256(⟨m⟩‖⟨Y⟩‖⟨PRESIGN⟩); return Σ.Verify(pk, h_m, σ').
+     * Do NOT compare against any embedded Y from ĥσ — a standalone verifier has only σ. */
+    if (!sig->witness || sig->witness_size == 0) {
         return ADAPTOR_ERROR_INVALID_SIGNATURE;
     }
-    
-    // Extract commitment key and expected HMAC
-    const uint8_t* commitment_key = sig->presignature.commitment;
-    const uint8_t* expected_hmac = sig->presignature.commitment + ADAPTOR_COMMITMENT_KEY_SIZE;
-    
-    // Verify witness matches commitment
-    const char* domain_sep = ADAPTOR_DS;
-    size_t domain_sep_len = strlen(domain_sep);
-    size_t witness_hash_input_size = domain_sep_len + ADAPTOR_MAX_WITNESS_BUFFER_SIZE;
-    
-    uint8_t* witness_hash_input = malloc(witness_hash_input_size);
-    if (!witness_hash_input) {
-        return ADAPTOR_ERROR_MEMORY_ALLOCATION;
+    const uint8_t* sigma_prime = sig->presignature.signature;
+    size_t sigma_prime_len = sig->presignature.signature_size;
+    if ((!sigma_prime || sigma_prime_len == 0) && sig->signature &&
+        sig->signature_size > sig->witness_size) {
+        sigma_prime_len = sig->signature_size - sig->witness_size;
+        sigma_prime = sig->signature;
     }
-    
-    // Construct HMAC input: domain_sep || witness
-    memcpy(witness_hash_input, domain_sep, domain_sep_len);
-    memcpy(witness_hash_input + domain_sep_len, sig->witness, sig->witness_size);
-    memset(witness_hash_input + domain_sep_len + sig->witness_size, 0, ADAPTOR_MAX_WITNESS_BUFFER_SIZE - sig->witness_size);
-    
-    // Generate HMAC for verification
-    uint8_t computed_hmac[ADAPTOR_COMMITMENT_MAC_SIZE];
-    unsigned int hmac_len = 0;
-    
-    const EVP_MD* md = EVP_sha256();
-    if (md == NULL) {
-        OPENSSL_cleanse(witness_hash_input, witness_hash_input_size);
-        free(witness_hash_input);
-        return ADAPTOR_ERROR_CRYPTO_OPERATION;
-    }
-    
-    const uint8_t* hmac_result = HMAC(md, commitment_key, ADAPTOR_COMMITMENT_KEY_SIZE, 
-                                      witness_hash_input, witness_hash_input_size, 
-                                      computed_hmac, &hmac_len);
-    
-    if (hmac_result == NULL || hmac_len != ADAPTOR_COMMITMENT_MAC_SIZE) {
-        OPENSSL_cleanse(witness_hash_input, witness_hash_input_size);
-        free(witness_hash_input);
-        return ADAPTOR_ERROR_CRYPTO_OPERATION;
-    }
-    
-    // Verify witness matches commitment
-    int hmac_match = OQS_MEM_secure_bcmp(computed_hmac, expected_hmac, ADAPTOR_COMMITMENT_MAC_SIZE);
-    
-    // Cleanup
-    OPENSSL_cleanse(witness_hash_input, witness_hash_input_size);
-    OPENSSL_cleanse(computed_hmac, sizeof(computed_hmac));
-    free(witness_hash_input);
-    
-    if (hmac_match != 0) {
+    if (!sigma_prime || sigma_prime_len == 0) {
         return ADAPTOR_ERROR_INVALID_SIGNATURE;
     }
-    
-    // Step 2: Verify the complete signature
-    // For our adaptor signature scheme, the complete signature verification involves:
-    // 1. Verifying that the presignature part is valid on the modified message
-    // 2. Verifying that the witness part matches the commitment
-    
-    // First, verify the presignature part on the modified message (m || c || "PRESIGN")
+
+    uint8_t Y_from_w[ADAPTOR_STATEMENT_SIZE];
+    if (adaptor_generate_statement_from_witness(sig->witness, sig->witness_size,
+                                                Y_from_w, sizeof(Y_from_w)) != ADAPTOR_SUCCESS) {
+        return ADAPTOR_ERROR_CRYPTO_OPERATION;
+    }
+
     uint8_t modified_message_hash[ADAPTOR_HASH_SIZE];
-    const char* presign_suffix = "PRESIGN";
-    size_t presign_suffix_len = strlen(presign_suffix);
-    const size_t MAX_MESSAGE_SIZE = ADAPTOR_MAX_MESSAGE_BUFFER_SIZE;
-    size_t modified_hash_input_size = MAX_MESSAGE_SIZE + sig->presignature.commitment_size + presign_suffix_len;
-    
-    uint8_t* modified_hash_input = malloc(modified_hash_input_size);
-    if (!modified_hash_input) {
-        return ADAPTOR_ERROR_MEMORY_ALLOCATION;
+    int hash_rc = adaptor_compute_presign_message_hash(modified_message_hash, message, message_len,
+                                                       Y_from_w, ADAPTOR_STATEMENT_SIZE);
+    OPENSSL_cleanse(Y_from_w, sizeof(Y_from_w));
+    if (hash_rc != ADAPTOR_SUCCESS) {
+        return hash_rc;
     }
     
-    // Construct modified message hash: m || c || "PRESIGN"
-    memcpy(modified_hash_input, message, message_len);
-    memset(modified_hash_input + message_len, 0, MAX_MESSAGE_SIZE - message_len);
-    memcpy(modified_hash_input + MAX_MESSAGE_SIZE, sig->presignature.commitment, sig->presignature.commitment_size);
-    memcpy(modified_hash_input + MAX_MESSAGE_SIZE + sig->presignature.commitment_size, presign_suffix, presign_suffix_len);
-    
-    // Hash the modified message
-    SHA256(modified_hash_input, modified_hash_input_size, modified_message_hash);
-    
-    // Securely clear modified hash input
-    OPENSSL_cleanse(modified_hash_input, modified_hash_input_size);
-    free(modified_hash_input);
-    
-    // Verify the presignature part on the modified message
     OQS_SIG *sig_obj = get_cached_signature_object((adaptor_context_t*)ctx);
     if (sig_obj == NULL) {
         return ADAPTOR_ERROR_LIBOQS_ERROR;
     }
     
-    // Verify the presignature part (first part of complete signature) on the modified message
     OQS_STATUS verify_result = OQS_SIG_verify(sig_obj, modified_message_hash, ADAPTOR_HASH_SIZE,
-                                             sig->presignature.signature, sig->presignature.signature_size,
+                                             sigma_prime, sigma_prime_len,
                                              (const uint8_t*)ctx->public_key);
     
     if (verify_result != OQS_SUCCESS) {
@@ -1224,77 +1231,21 @@ int adaptor_witness_verify(const adaptor_presignature_t* presig,
            witness_len, presig->witness_size);
 #endif
     
-    // CRITICAL: Always perform HMAC computation for constant-time execution
-    // This prevents timing attacks by ensuring all cryptographic operations are performed
-    
-    uint8_t c_check[ADAPTOR_COMMITMENT_MAC_SIZE];
-    unsigned int hmac_len;
+    uint8_t Y_check[ADAPTOR_STATEMENT_SIZE];
     int hmac_valid = 0;
-    
-    // Always perform HMAC computation regardless of input validity
-    if (length_valid && presig->commitment) {
-        // Extract the commitment key from the statement (first 32 bytes of 64-byte statement)
-        const uint8_t* commitment_key = presig->commitment;
-        
-        // Prepare HMAC input with domain separation
-        // CRITICAL FIX: Use constant input size for timing attack resistance
-        const char* domain_sep = ADAPTOR_DS;
-        size_t domain_sep_len = strlen(domain_sep);
-        size_t hmac_input_size = domain_sep_len + ADAPTOR_MAX_WITNESS_BUFFER_SIZE;
-        uint8_t* hmac_input = malloc(hmac_input_size);
-        
-        if (hmac_input) {
-            // Copy domain separator
-            memcpy(hmac_input, domain_sep, domain_sep_len);
-            // Copy witness and pad with zeros for constant-time execution
-            memcpy(hmac_input + domain_sep_len, witness, witness_len);
-            // Zero-pad the remaining bytes for constant-time execution
-            memset(hmac_input + domain_sep_len + witness_len, 0, ADAPTOR_MAX_WITNESS_BUFFER_SIZE - witness_len);
-            
-            // Generate HMAC-SHA256 commitment for verification
-            // CRITICAL FIX: Add timeout protection for HMAC computation
-            const EVP_MD* md = EVP_sha256();
-            if (md != NULL) {
-                const uint8_t* hmac_result = HMAC(md, commitment_key, ADAPTOR_COMMITMENT_KEY_SIZE, 
-                                                  hmac_input, hmac_input_size, c_check, &hmac_len);
-                if (hmac_result != NULL) {
-                    // Validate HMAC output length
-                    if (hmac_len == ADAPTOR_COMMITMENT_MAC_SIZE) {
-                        // Constant-time comparison to prevent timing attacks
-                        hmac_valid = (OQS_MEM_secure_bcmp(c_check, presig->commitment + ADAPTOR_COMMITMENT_KEY_SIZE, 
-                                                   ADAPTOR_COMMITMENT_MAC_SIZE) == 0);
-                    }
-                }
-            }
-            
-            // Securely clear sensitive data
-            OPENSSL_cleanse(hmac_input, hmac_input_size);
-            free(hmac_input);
-        }
+
+    if (length_valid && presig->commitment &&
+        adaptor_generate_statement_from_witness(witness, witness_len, Y_check, sizeof(Y_check)) == ADAPTOR_SUCCESS) {
+        hmac_valid = (OQS_MEM_secure_bcmp(Y_check, presig->commitment, ADAPTOR_STATEMENT_SIZE) == 0);
+        OPENSSL_cleanse(Y_check, sizeof(Y_check));
     } else {
-        // Perform timing resistance HMAC computation for constant-time execution when inputs are invalid
-        const char* invalid_key = ADAPTOR_INVALID_INPUT_KEY;
-        const char* invalid_input = ADAPTOR_INVALID_INPUT_DATA;
-        size_t invalid_input_len = strlen(invalid_input);
-        
-        // CRITICAL FIX: Add timeout protection for HMAC computation
-        const EVP_MD* md = EVP_sha256();
-        if (md != NULL) {
-            const uint8_t* hmac_result = HMAC(md, invalid_key, ADAPTOR_COMMITMENT_KEY_SIZE, 
-                                              (const uint8_t*)invalid_input, invalid_input_len, 
-                                              c_check, &hmac_len);
-            if (hmac_result != NULL) {
-                // Dummy comparison for constant-time execution
-                (void)OQS_MEM_secure_bcmp(c_check, c_check, ADAPTOR_COMMITMENT_MAC_SIZE);
-            }
-        }
+        OPENSSL_cleanse(Y_check, sizeof(Y_check));
+        /* Dummy work for roughly similar cost on invalid paths */
+        (void)OQS_MEM_secure_bcmp(Y_check, Y_check, ADAPTOR_STATEMENT_SIZE);
     }
     
     // Set final result based on all validation checks
     result = length_valid && hmac_valid;
-    
-    // Securely clear computed HMAC
-    OPENSSL_cleanse(c_check, ADAPTOR_COMMITMENT_MAC_SIZE);
     
 #if ADAPTOR_DEBUG
     if (result) {
@@ -1438,8 +1389,7 @@ static int adaptor_generate_incomplete_presignature(adaptor_presignature_t* pres
     printf("    Message length: %zu bytes\n", message_len);
 #endif
     
-    // Get liboqs algorithm name
-    const char* alg_name = get_algorithm_name(ctx->params.scheme, ctx->params.security_level);
+    const char* alg_name = get_context_algorithm_name(ctx);
     if (!alg_name) {
         return ADAPTOR_ERROR_INVALID_SECURITY_LEVEL;
     }
@@ -1453,9 +1403,7 @@ static int adaptor_generate_incomplete_presignature(adaptor_presignature_t* pres
     }
     memcpy(presig->commitment, statement_c, presig->commitment_size);
     
-    // Step 2: Create modified message for pre-signature
-    // We sign on H(m || c || "PRESIGN") instead of H(m || c)
-    // This ensures the pre-signature cannot be verified as a regular signature
+    // Step 2: h_m = SHA256(⟨m⟩ ‖ ⟨Y⟩ ‖ ⟨PRESIGN⟩)
     presig->message_hash_size = ADAPTOR_HASH_SIZE;
     presig->message_hash = malloc(presig->message_hash_size);
     if (!presig->message_hash) {
@@ -1464,38 +1412,18 @@ static int adaptor_generate_incomplete_presignature(adaptor_presignature_t* pres
         presig->commitment_size = 0;
         return ADAPTOR_ERROR_MEMORY_ALLOCATION;
     }
-    
-    // Create modified message: m || c || "PRESIGN"
-    const char* presign_suffix = "PRESIGN";
-    size_t presign_suffix_len = strlen(presign_suffix);
-    const size_t MAX_MESSAGE_SIZE = ADAPTOR_MAX_MESSAGE_BUFFER_SIZE;
-    size_t modified_message_size = MAX_MESSAGE_SIZE + presig->commitment_size + presign_suffix_len;
-    
-    uint8_t* modified_message = malloc(modified_message_size);
-    if (!modified_message) {
+    if (adaptor_compute_presign_message_hash(presig->message_hash, message, message_len,
+                                             presig->commitment, presig->commitment_size) != ADAPTOR_SUCCESS) {
         free(presig->message_hash);
         presig->message_hash = NULL;
         presig->message_hash_size = 0;
         free(presig->commitment);
         presig->commitment = NULL;
         presig->commitment_size = 0;
-        return ADAPTOR_ERROR_MEMORY_ALLOCATION;
+        return ADAPTOR_ERROR_CRYPTO_OPERATION;
     }
     
-    // Construct modified message: m || c || "PRESIGN"
-    memcpy(modified_message, message, message_len);
-    memset(modified_message + message_len, 0, MAX_MESSAGE_SIZE - message_len);
-    memcpy(modified_message + MAX_MESSAGE_SIZE, presig->commitment, presig->commitment_size);
-    memcpy(modified_message + MAX_MESSAGE_SIZE + presig->commitment_size, presign_suffix, presign_suffix_len);
-    
-    // Hash the modified message
-    SHA256(modified_message, modified_message_size, presig->message_hash);
-    
-    // Securely clear modified message
-    OPENSSL_cleanse(modified_message, modified_message_size);
-    free(modified_message);
-    
-    // Step 3: Generate incomplete signature using liboqs
+    // Step 3: Sign h_m
     OQS_SIG *sig_obj = get_cached_signature_object((adaptor_context_t*)ctx);
     if (sig_obj == NULL) {
         free(presig->message_hash);
@@ -1507,7 +1435,6 @@ static int adaptor_generate_incomplete_presignature(adaptor_presignature_t* pres
         return ADAPTOR_ERROR_LIBOQS_ERROR;
     }
     
-    // Allocate signature buffer with actual size needed
     presig->signature_size = sig_obj->length_signature;
     if (presig->signature_size == 0 || presig->signature_size > ADAPTOR_MAX_SIGNATURE_SIZE) {
         free(presig->message_hash);
@@ -1530,12 +1457,10 @@ static int adaptor_generate_incomplete_presignature(adaptor_presignature_t* pres
         return ADAPTOR_ERROR_MEMORY_ALLOCATION;
     }
     
-    // Generate signature on modified message
     size_t actual_signature_size = presig->signature_size;
     OQS_STATUS sign_status = OQS_SIG_sign(sig_obj, presig->signature, &actual_signature_size,
                                          presig->message_hash, presig->message_hash_size,
                                          (const uint8_t*)ctx->private_key);
-    
     presig->signature_size = actual_signature_size;
     
     if (sign_status != OQS_SUCCESS) {
@@ -1551,15 +1476,9 @@ static int adaptor_generate_incomplete_presignature(adaptor_presignature_t* pres
         return ADAPTOR_ERROR_LIBOQS_ERROR;
     }
     
-    // Step 4: Verify that the pre-signature is incomplete
-    // It should NOT verify as a regular signature on the original message
-    if (adaptor_verify_presignature_incomplete(presig, ctx, message, message_len)) {
-        // This is expected - the pre-signature should be incomplete
-#if ADAPTOR_DEBUG
-        printf("    Pre-signature is incomplete (as expected)\n");
-#endif
-    } else {
-        // This is an error - the pre-signature should be incomplete
+#if ADAPTOR_PRESIG_SELFTEST
+    /* Extra OQS_SIG_verify — off by default so PreSig timings are not inflated. */
+    if (!adaptor_verify_presignature_incomplete(presig, ctx, message, message_len)) {
         free(presig->signature);
         presig->signature = NULL;
         presig->signature_size = 0;
@@ -1571,6 +1490,7 @@ static int adaptor_generate_incomplete_presignature(adaptor_presignature_t* pres
         presig->commitment_size = 0;
         return ADAPTOR_ERROR_CRYPTO_OPERATION;
     }
+#endif
     
 #if ADAPTOR_DEBUG
     printf("    Incomplete presignature generated successfully\n");
@@ -1597,62 +1517,24 @@ static int adaptor_complete_signature_with_witness(adaptor_signature_t* sig,
     if (witness_len != presig->witness_size) {
         return ADAPTOR_ERROR_INVALID_INPUT_SIZE;
     }
+
+    /* Idempotent Adapt: free any prior buffers before reallocating (bench amplification). */
+    (void)adaptor_signature_cleanup(sig);
     
-    // Validate witness-commitment binding
+    // Validate witness-commitment binding via full GenerateStatement (enforces R, incl. k)
     if (!presig->commitment || presig->commitment_size != ADAPTOR_STATEMENT_SIZE) {
         return ADAPTOR_ERROR_INVALID_SIGNATURE;
     }
-    
-    // Extract commitment key and expected HMAC
-    const uint8_t* commitment_key = presig->commitment;
-    const uint8_t* expected_hmac = presig->commitment + ADAPTOR_COMMITMENT_KEY_SIZE;
-    
-    // Verify witness matches commitment
-    const char* domain_sep = ADAPTOR_DS;
-    size_t domain_sep_len = strlen(domain_sep);
-    size_t witness_hash_input_size = domain_sep_len + ADAPTOR_MAX_WITNESS_BUFFER_SIZE;
-    
-    uint8_t* witness_hash_input = malloc(witness_hash_input_size);
-    if (!witness_hash_input) {
-        return ADAPTOR_ERROR_MEMORY_ALLOCATION;
-    }
-    
-    // Construct HMAC input: domain_sep || witness
-    memcpy(witness_hash_input, domain_sep, domain_sep_len);
-    memcpy(witness_hash_input + domain_sep_len, witness, witness_len);
-    memset(witness_hash_input + domain_sep_len + witness_len, 0, ADAPTOR_MAX_WITNESS_BUFFER_SIZE - witness_len);
-    
-    // Generate HMAC for verification
-    uint8_t computed_hmac[ADAPTOR_COMMITMENT_MAC_SIZE];
-    unsigned int hmac_len = 0;
-    
-    const EVP_MD* md = EVP_sha256();
-    if (md == NULL) {
-        OPENSSL_cleanse(witness_hash_input, witness_hash_input_size);
-        free(witness_hash_input);
-        return ADAPTOR_ERROR_CRYPTO_OPERATION;
-    }
-    
-    const uint8_t* hmac_result = HMAC(md, commitment_key, ADAPTOR_COMMITMENT_KEY_SIZE, 
-                                      witness_hash_input, witness_hash_input_size, 
-                                      computed_hmac, &hmac_len);
-    
-    if (hmac_result == NULL || hmac_len != ADAPTOR_COMMITMENT_MAC_SIZE) {
-        OPENSSL_cleanse(witness_hash_input, witness_hash_input_size);
-        free(witness_hash_input);
-        return ADAPTOR_ERROR_CRYPTO_OPERATION;
-    }
-    
-    // Verify witness matches commitment
-    int hmac_match = OQS_MEM_secure_bcmp(computed_hmac, expected_hmac, ADAPTOR_COMMITMENT_MAC_SIZE);
-    
-    // Cleanup
-    OPENSSL_cleanse(witness_hash_input, witness_hash_input_size);
-    OPENSSL_cleanse(computed_hmac, sizeof(computed_hmac));
-    free(witness_hash_input);
-    
-    if (hmac_match != 0) {
-        return ADAPTOR_ERROR_INVALID_WITNESS;
+    {
+        uint8_t Y_check[ADAPTOR_STATEMENT_SIZE];
+        if (adaptor_generate_statement_from_witness(witness, witness_len, Y_check, sizeof(Y_check)) != ADAPTOR_SUCCESS) {
+            return ADAPTOR_ERROR_CRYPTO_OPERATION;
+        }
+        int match = OQS_MEM_secure_bcmp(Y_check, presig->commitment, ADAPTOR_STATEMENT_SIZE);
+        OPENSSL_cleanse(Y_check, sizeof(Y_check));
+        if (match != 0) {
+            return ADAPTOR_ERROR_INVALID_WITNESS;
+        }
     }
     
     // Deep copy presignature data
@@ -1823,76 +1705,37 @@ static int adaptor_extract_witness_from_difference(uint8_t* witness, size_t witn
         return ADAPTOR_ERROR_INVALID_SIGNATURE;
     }
     
-    // Calculate the presignature part size
+    // Parse witness from the concatenated full signature σ = σ' || w.
+    // Do NOT require σ' == presig->signature (paper Extract / EXT game): binding is
+    // enforced by checking HMAC(w) against the statement Y embedded in the pre-signature.
+    if (sig->witness_size == 0 || sig->witness_size > ADAPTOR_MAX_WITNESS_BUFFER_SIZE) {
+        return ADAPTOR_ERROR_INVALID_SIGNATURE;
+    }
+    if (presig->witness_size != 0 && sig->witness_size != presig->witness_size) {
+        return ADAPTOR_ERROR_INVALID_SIGNATURE;
+    }
     size_t presignature_size = sig->signature_size - sig->witness_size;
-    
-    // Verify that the presignature part matches the original presignature
-    if (presignature_size != presig->signature_size) {
+    if (presignature_size == 0) {
         return ADAPTOR_ERROR_INVALID_SIGNATURE;
     }
-    
-    // Verify the presignature part matches using constant-time comparison
-    if (OQS_MEM_secure_bcmp(presig->signature, sig->signature, presignature_size) != 0) {
-        return ADAPTOR_ERROR_INVALID_SIGNATURE;
-    }
-    
-    // Extract witness from the complete signature (the part after the presignature)
+
     memcpy(witness, sig->signature + presignature_size, sig->witness_size);
-    
-    // Note: No zero-padding needed since witness buffer is exactly the right size
-    
-    // Verify that the extracted witness matches the commitment
-    // This ensures the witness was correctly extracted
-    const uint8_t* commitment_key = presig->commitment;
-    const uint8_t* expected_hmac = presig->commitment + ADAPTOR_COMMITMENT_KEY_SIZE;
-    
-    // Prepare HMAC input with domain separation
-    const char* domain_sep = ADAPTOR_DS;
-    size_t domain_sep_len = strlen(domain_sep);
-    size_t witness_hash_input_size = domain_sep_len + ADAPTOR_MAX_WITNESS_BUFFER_SIZE;
-    uint8_t* witness_hash_input = malloc(witness_hash_input_size);
-    if (!witness_hash_input) {
-        return ADAPTOR_ERROR_MEMORY_ALLOCATION;
+
+    /* Enforce full R: Y = GenerateStatement(w), not merely HMAC under supplied k. */
+    if (!presig->commitment || presig->commitment_size < ADAPTOR_STATEMENT_SIZE) {
+        return ADAPTOR_ERROR_INVALID_SIGNATURE;
     }
-    
-    // Copy domain separator
-    memcpy(witness_hash_input, domain_sep, domain_sep_len);
-    // Copy witness and pad with zeros for constant-time execution
-    memcpy(witness_hash_input + domain_sep_len, witness, sig->witness_size);
-    // Zero-pad the remaining bytes for constant-time execution
-    memset(witness_hash_input + domain_sep_len + sig->witness_size, 0, ADAPTOR_MAX_WITNESS_BUFFER_SIZE - sig->witness_size);
-    
-    // Generate HMAC-SHA256 commitment for verification
-    uint8_t computed_hmac[ADAPTOR_COMMITMENT_MAC_SIZE];
-    unsigned int hmac_len = 0;
-    
-    const EVP_MD* md = EVP_sha256();
-    if (md == NULL) {
-        OPENSSL_cleanse(witness_hash_input, witness_hash_input_size);
-        free(witness_hash_input);
-        return ADAPTOR_ERROR_EXTRACTION_FAILED;
-    }
-    
-    const uint8_t* hmac_result = HMAC(md, commitment_key, ADAPTOR_COMMITMENT_KEY_SIZE, 
-                                      witness_hash_input, witness_hash_input_size, 
-                                      computed_hmac, &hmac_len);
-    
-    if (hmac_result == NULL || hmac_len != ADAPTOR_COMMITMENT_MAC_SIZE) {
-        OPENSSL_cleanse(witness_hash_input, witness_hash_input_size);
-        free(witness_hash_input);
-        return ADAPTOR_ERROR_EXTRACTION_FAILED;
-    }
-    
-    // Verify extracted witness matches commitment
-    int hmac_match = OQS_MEM_secure_bcmp(computed_hmac, expected_hmac, ADAPTOR_COMMITMENT_MAC_SIZE);
-    
-    // Cleanup
-    OPENSSL_cleanse(witness_hash_input, witness_hash_input_size);
-    OPENSSL_cleanse(computed_hmac, sizeof(computed_hmac));
-    free(witness_hash_input);
-    
-    if (hmac_match != 0) {
-        return ADAPTOR_ERROR_EXTRACTION_FAILED;
+    {
+        uint8_t Y_check[ADAPTOR_STATEMENT_SIZE];
+        if (adaptor_generate_statement_from_witness(witness, sig->witness_size,
+                                                    Y_check, sizeof(Y_check)) != ADAPTOR_SUCCESS) {
+            return ADAPTOR_ERROR_EXTRACTION_FAILED;
+        }
+        int match = OQS_MEM_secure_bcmp(Y_check, presig->commitment, ADAPTOR_STATEMENT_SIZE);
+        OPENSSL_cleanse(Y_check, sizeof(Y_check));
+        if (match != 0) {
+            return ADAPTOR_ERROR_EXTRACTION_FAILED;
+        }
     }
     
     return ADAPTOR_SUCCESS;
@@ -1907,49 +1750,34 @@ static int adaptor_extract_witness_from_difference(uint8_t* witness, size_t witn
 static bool adaptor_verify_presignature_incomplete(const adaptor_presignature_t* presig,
                                                   const adaptor_context_t* ctx,
                                                   const uint8_t* message, size_t message_len) {
-    // Input validation
-    if (!presig || !ctx || !message) {
+    if (!presig || !ctx || !message || !presig->commitment) {
         return false;
     }
-    
-    // The pre-signature should NOT verify as a regular signature on the original message
-    // This is the key property of adaptor signatures
-    
-    // Create the original message hash (without the "PRESIGN" suffix)
+    /* σ' should not verify under h = SHA256(⟨m⟩‖⟨Y⟩) (missing ⟨PRESIGN⟩). */
+    size_t total = adaptor_lp_size(message_len) + adaptor_lp_size(presig->commitment_size);
+    uint8_t* buf = malloc(total);
+    if (!buf) {
+        return false;
+    }
+    size_t off = 0;
+    if (adaptor_append_lp(buf, total, &off, message, message_len) != 0 ||
+        adaptor_append_lp(buf, total, &off, presig->commitment, presig->commitment_size) != 0) {
+        OPENSSL_cleanse(buf, total);
+        free(buf);
+        return false;
+    }
     uint8_t original_message_hash[ADAPTOR_HASH_SIZE];
-    const size_t MAX_MESSAGE_SIZE = ADAPTOR_MAX_MESSAGE_BUFFER_SIZE;
-    size_t original_hash_input_size = MAX_MESSAGE_SIZE + presig->commitment_size;
-    
-    uint8_t* original_hash_input = malloc(original_hash_input_size);
-    if (!original_hash_input) {
-        return false;
-    }
-    
-    // Construct original message hash: m || c (without "PRESIGN" suffix)
-    memcpy(original_hash_input, message, message_len);
-    memset(original_hash_input + message_len, 0, MAX_MESSAGE_SIZE - message_len);
-    memcpy(original_hash_input + MAX_MESSAGE_SIZE, presig->commitment, presig->commitment_size);
-    
-    // Hash the original message
-    SHA256(original_hash_input, original_hash_input_size, original_message_hash);
-    
-    // Securely clear original hash input
-    OPENSSL_cleanse(original_hash_input, original_hash_input_size);
-    free(original_hash_input);
-    
-    // Try to verify the pre-signature as a regular signature on the original message
-    // This should FAIL for a proper adaptor signature
+    SHA256(buf, total, original_message_hash);
+    OPENSSL_cleanse(buf, total);
+    free(buf);
+
     OQS_SIG *sig_obj = get_cached_signature_object((adaptor_context_t*)ctx);
     if (sig_obj == NULL) {
         return false;
     }
-    
     OQS_STATUS verify_result = OQS_SIG_verify(sig_obj, original_message_hash, ADAPTOR_HASH_SIZE,
                                              presig->signature, presig->signature_size,
                                              (const uint8_t*)ctx->public_key);
-    
-    // The pre-signature should NOT verify as a regular signature
-    // If it does, then it's not a proper adaptor signature
     return (verify_result != OQS_SUCCESS);
 }
 
@@ -1969,26 +1797,9 @@ static bool adaptor_verify_mathematical_properties(const adaptor_params_t* param
         return false;
     }
     
-    // Verify witness size is appropriate for security level
-    uint32_t min_witness_size, max_witness_size;
-    switch (params->security_level) {
-        case 128:
-            min_witness_size = 16;
-            max_witness_size = 64;
-            break;
-        case 192:
-            min_witness_size = 24;
-            max_witness_size = 80;
-            break;
-        case 256:
-            min_witness_size = 32;
-            max_witness_size = ADAPTOR_MAX_WITNESS_SIZE_256;
-            break;
-        default:
-            return false;
-    }
-    
-    if (params->witness_size < min_witness_size || params->witness_size > max_witness_size) {
+    // Witness length must be exactly 2λ bytes
+    uint32_t expected_witness = adaptor_expected_witness_bytes(params->security_level);
+    if (expected_witness == 0 || params->witness_size != expected_witness) {
         return false;
     }
     
@@ -2147,6 +1958,7 @@ int adaptor_context_init(adaptor_context_t* ctx, const adaptor_params_t* params,
     
     // Initialize cached signature object for constant-time verification
     ctx->cached_sig_obj = NULL;
+    ctx->oqs_algorithm = NULL;
     
     // FIXED: Simplified validation to prevent false failures during stress testing
     // These checks are important for security but were too strict for testing
@@ -2168,6 +1980,21 @@ int adaptor_context_init(adaptor_context_t* ctx, const adaptor_params_t* params,
 }
 
 // The commitment key is now embedded in the statement: c = key || HMAC(key, ADAPTOR_DS || w)
+
+int adaptor_context_set_oqs_algorithm(adaptor_context_t* ctx, const char* oqs_alg_id) {
+    if (!ctx || !oqs_alg_id) {
+        return ADAPTOR_ERROR_NULL_POINTER;
+    }
+    if (!OQS_SIG_alg_is_enabled(oqs_alg_id)) {
+        return ADAPTOR_ERROR_LIBOQS_ERROR;
+    }
+    if (ctx->cached_sig_obj) {
+        OQS_SIG_free((OQS_SIG*)ctx->cached_sig_obj);
+        ctx->cached_sig_obj = NULL;
+    }
+    ctx->oqs_algorithm = oqs_alg_id;
+    return ADAPTOR_SUCCESS;
+}
 
 int adaptor_context_cleanup(adaptor_context_t* ctx) {
     if (!ctx) {
@@ -2396,28 +2223,14 @@ static bool adaptor_validate_crypto_params_comprehensive(const adaptor_params_t*
         return false;
     }
     
-    // Validate witness size bounds based on security level
-    uint32_t min_witness_size, max_witness_size;
-    switch (params->security_level) {
-        case 128:
-            min_witness_size = 16;
-            max_witness_size = 80;
-            break;
-        case 192:
-            min_witness_size = 24;
-            max_witness_size = ADAPTOR_MAX_WITNESS_SIZE_128;
-            break;
-        case 256:
-            min_witness_size = 32;
-            max_witness_size = ADAPTOR_MAX_WITNESS_SIZE_192;
-            break;
-        default:
+    // Witness length must be exactly 2λ bytes
+    uint32_t expected_witness = adaptor_expected_witness_bytes(params->security_level);
+    if (expected_witness == 0) {
             adaptor_set_error_context(ADAPTOR_ERROR_INVALID_SECURITY_LEVEL, __FUNCTION__, __LINE__, __FILE__,
                                     "Invalid security level: %u", params->security_level);
             return false;
     }
-    
-    if (!adaptor_validate_numeric_bounds(params->witness_size, min_witness_size, max_witness_size, "witness_size")) {
+    if (!adaptor_validate_numeric_bounds(params->witness_size, expected_witness, expected_witness, "witness_size")) {
         return false;
     }
     
@@ -2728,83 +2541,50 @@ static bool adaptor_validate_commitment_data(const uint8_t* commitment, size_t c
     // The statement must be properly formatted as: key[32] || HMAC[32]
     // This prevents acceptance of malformed or invalid statements
     
-    // Check for all-zero commitment (invalid)
-    bool is_all_zeros = true;
+    // Check for all-zero commitment (invalid) — constant-time accumulate, no early break
+    uint8_t zero_acc = 0;
     for (size_t i = 0; i < commitment_size; i++) {
-        if (commitment[i] != 0) {
-            is_all_zeros = false;
-            break;
-        }
+        zero_acc |= commitment[i];
     }
-    
-    if (is_all_zeros) {
+    if (zero_acc == 0) {
         adaptor_set_error_context(ADAPTOR_ERROR_INVALID_PARAMS, __FUNCTION__, __LINE__, __FILE__,
                                 "Invalid statement: all-zero commitment rejected");
         return false;
     }
     
     // Check for all-ones commitment (invalid)
-    bool is_all_ones = true;
+    uint8_t ones_acc = 0xFF;
     for (size_t i = 0; i < commitment_size; i++) {
-        if (commitment[i] != 0xFF) {
-            is_all_ones = false;
-            break;
-        }
+        ones_acc &= commitment[i];
     }
-    
-    if (is_all_ones) {
+    if (ones_acc == 0xFF) {
         adaptor_set_error_context(ADAPTOR_ERROR_INVALID_PARAMS, __FUNCTION__, __LINE__, __FILE__,
                                 "Invalid statement: all-ones commitment rejected");
         return false;
     }
-    
-    // Validate commitment key portion (first 32 bytes) - should not be all zeros or all ones
-    bool key_is_all_zeros = true;
-    bool key_is_all_ones = true;
+
+    uint8_t key_zero = 0, key_ones = 0xFF;
     for (size_t i = 0; i < ADAPTOR_COMMITMENT_KEY_SIZE; i++) {
-        if (commitment[i] != 0) key_is_all_zeros = false;
-        if (commitment[i] != 0xFF) key_is_all_ones = false;
+        key_zero |= commitment[i];
+        key_ones &= commitment[i];
     }
-    
-    if (key_is_all_zeros || key_is_all_ones) {
+    if (key_zero == 0 || key_ones == 0xFF) {
         adaptor_set_error_context(ADAPTOR_ERROR_INVALID_PARAMS, __FUNCTION__, __LINE__, __FILE__,
                                 "Invalid statement: commitment key portion is invalid (all zeros or all ones)");
         return false;
     }
-    
-    // Validate HMAC portion (last 32 bytes) - should not be all zeros or all ones
-    bool hmac_is_all_zeros = true;
-    bool hmac_is_all_ones = true;
+
+    uint8_t hmac_zero = 0, hmac_ones = 0xFF;
     for (size_t i = ADAPTOR_COMMITMENT_KEY_SIZE; i < ADAPTOR_STATEMENT_SIZE; i++) {
-        if (commitment[i] != 0) hmac_is_all_zeros = false;
-        if (commitment[i] != 0xFF) hmac_is_all_ones = false;
+        hmac_zero |= commitment[i];
+        hmac_ones &= commitment[i];
     }
-    
-    if (hmac_is_all_zeros || hmac_is_all_ones) {
+    if (hmac_zero == 0 || hmac_ones == 0xFF) {
         adaptor_set_error_context(ADAPTOR_ERROR_INVALID_PARAMS, __FUNCTION__, __LINE__, __FILE__,
                                 "Invalid statement: HMAC portion is invalid (all zeros or all ones)");
         return false;
     }
-    
-    // Additional validation: Check for obvious patterns that indicate invalid statements
-    // This helps reject statements that look like they weren't generated properly
-    
-    // Check for repeated byte patterns in the key portion (indicates poor randomness)
-    uint8_t first_byte = commitment[0];
-    bool key_is_repeated_pattern = true;
-    for (size_t i = 1; i < ADAPTOR_COMMITMENT_KEY_SIZE; i++) {
-        if (commitment[i] != first_byte) {
-            key_is_repeated_pattern = false;
-            break;
-        }
-    }
-    
-    if (key_is_repeated_pattern) {
-        adaptor_set_error_context(ADAPTOR_ERROR_INVALID_PARAMS, __FUNCTION__, __LINE__, __FILE__,
-                                "Invalid statement: commitment key appears to be a repeated pattern");
-        return false;
-    }
-    
+
     return true;
 }
 
@@ -2839,31 +2619,19 @@ static bool adaptor_validate_buffer_content(const uint8_t* buffer, size_t size,
         return false;
     }
     
-    // Check for all-zero buffer (potential security issue)
-    bool all_zero = true;
+    /* Constant-time all-zero / all-ones checks (no secret-dependent early exit). */
+    uint8_t zero_acc = 0;
+    uint8_t ones_acc = 0xFF;
     for (size_t i = 0; i < size; i++) {
-        if (buffer[i] != 0) {
-            all_zero = false;
-            break;
-        }
+        zero_acc |= buffer[i];
+        ones_acc &= buffer[i];
     }
-    
-    if (all_zero) {
+    if (zero_acc == 0) {
         adaptor_set_error_context(ADAPTOR_ERROR_CRYPTOGRAPHIC_WEAKNESS, __FUNCTION__, __LINE__, __FILE__,
                                 "%s buffer contains all zeros", buffer_name);
         return false;
     }
-    
-    // Check for all-ones buffer (potential security issue)
-    bool all_ones = true;
-    for (size_t i = 0; i < size; i++) {
-        if (buffer[i] != 0xFF) {
-            all_ones = false;
-            break;
-        }
-    }
-    
-    if (all_ones) {
+    if (ones_acc == 0xFF) {
         adaptor_set_error_context(ADAPTOR_ERROR_CRYPTOGRAPHIC_WEAKNESS, __FUNCTION__, __LINE__, __FILE__,
                                 "%s buffer contains all ones", buffer_name);
         return false;
@@ -2877,29 +2645,16 @@ static bool adaptor_validate_buffer_content(const uint8_t* buffer, size_t size,
  * Validate entropy distribution in random data
  */
 static bool adaptor_validate_entropy_distribution(const uint8_t* data, size_t size) {
+    /* Not statistically meaningful for |w| << 256; reject only pathological inputs. */
     if (!data || size == 0) {
         return false;
     }
-    
-    // Count byte frequencies
-    uint32_t byte_counts[ADAPTOR_BYTE_COUNT_SIZE] = {0};
+    uint8_t zero_acc = 0, ones_acc = 0xFF;
     for (size_t i = 0; i < size; i++) {
-        byte_counts[data[i]]++;
+        zero_acc |= data[i];
+        ones_acc &= data[i];
     }
-    
-    // Check for uniform distribution (simplified test)
-    uint32_t expected_count = size / ADAPTOR_BYTE_COUNT_SIZE;
-    uint32_t tolerance = expected_count / 4; // 25% tolerance
-    
-    for (int i = 0; i < ADAPTOR_BYTE_COUNT_SIZE; i++) {
-        if (byte_counts[i] > expected_count + tolerance || 
-            byte_counts[i] < expected_count - tolerance) {
-            // This is a simplified check - in practice, you'd use more sophisticated tests
-            continue;
-        }
-    }
-    
-    return true;
+    return (zero_acc != 0) && (ones_acc != 0xFF);
 }
 
 /**

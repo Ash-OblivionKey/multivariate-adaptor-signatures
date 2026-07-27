@@ -80,6 +80,8 @@ typedef struct {
     void* private_key;        // UOV or MAYO private key
     void* public_key;         // UOV or MAYO public key
     void* cached_sig_obj;     // Cached OQS_SIG object for constant-time verification
+    /* Optional liboqs algorithm id (e.g. ov-Ip). NULL → map from (scheme, security_level). */
+    const char* oqs_algorithm;
 } adaptor_context_t;
 
 // ============================================================================
@@ -131,15 +133,29 @@ typedef enum {
 // Constant-time operation buffer sizes
 #define ADAPTOR_MAX_SIGNATURE_SIZE (1024 * 1024)  // 1MB max signature size for constant-time operations
 #define ADAPTOR_MAX_MESSAGE_BUFFER_SIZE 1024      // 1KB message buffer for constant-time operations
-#define ADAPTOR_MAX_WITNESS_BUFFER_SIZE 80        // 80 bytes witness buffer for constant-time operations
+#define ADAPTOR_MAX_WITNESS_BUFFER_SIZE 64        // 2λ max (λ=256 → 64 bytes); CT padding size
 
 // Statement/commitment constants - always use SHA256 for consistency
 #define ADAPTOR_COMMITMENT_KEY_SIZE 32          // Commitment key size
 #define ADAPTOR_COMMITMENT_MAC_SIZE 32          // HMAC-SHA256 commitment size
 #define ADAPTOR_STATEMENT_SIZE (ADAPTOR_COMMITMENT_KEY_SIZE + ADAPTOR_COMMITMENT_MAC_SIZE) // 64 bytes total
-// Statement layout: statement_c = key[32] || mac[32] where mac = HMAC(key, ADAPTOR_DS || w)
+/* Statement layout: Y = k[32] || h_com[32] with k,h_com as in §4 (length-prefixed inputs). */
 #define ADAPTOR_HASH_SIZE 32                    // SHA256 output size (fixed)
 #define ADAPTOR_DS "ADAPTORv1"                  // Domain separation string for HMAC
+#define ADAPTOR_COMMITMENT_SALT "ADAPTOR_COMMITMENT_SALT_v1"
+#define ADAPTOR_PRESIGN_LABEL "PRESIGN"
+#define ADAPTOR_LEN_PREFIX_SIZE 4               // ⟨s⟩ = len(s)||s, 4-byte big-endian
+/* PreSign self-check (extra OQS_SIG_verify). Off by default so PreSig timings are honest. */
+#ifndef ADAPTOR_PRESIG_SELFTEST
+#define ADAPTOR_PRESIG_SELFTEST 0
+#endif
+/* PreVerify incompleteness self-check (second OQS_SIG_verify on the non-PRESIGN hash).
+ * Off by default: PreVerify then measures exactly the Algorithm 7 path
+ * (h_m consistency + Sigma.Verify). Tests assert incompleteness via
+ * adaptor_presignature_assert_incomplete(). */
+#ifndef ADAPTOR_PREVERIFY_SELFTEST
+#define ADAPTOR_PREVERIFY_SELFTEST 0
+#endif
 
 // Compile-time assertions for constant consistency
 _Static_assert(ADAPTOR_STATEMENT_SIZE == 64, "Statement size must be exactly 64 bytes");
@@ -195,6 +211,13 @@ const char* adaptor_get_error_string(adaptor_error_t error_code);
  */
 int adaptor_context_init(adaptor_context_t* ctx, const adaptor_params_t* params,
                         void* priv_key, void* pub_key);
+
+/**
+ * Override the liboqs algorithm used by this context (e.g. "OV-Ip" / uov_ov_Ip).
+ * Must be called after init and before any Sign/Verify; clears any cached OQS_SIG.
+ * @return ADAPTOR_SUCCESS, or error if alg is NULL/disabled
+ */
+int adaptor_context_set_oqs_algorithm(adaptor_context_t* ctx, const char* oqs_alg_id);
 
 
 /**
@@ -265,6 +288,14 @@ int adaptor_presignature_cleanup(adaptor_presignature_t* presig);
  */
 size_t adaptor_presignature_size(const adaptor_presignature_t* presig);
 
+/**
+ * Assert pre-signature incompleteness (σ' does not verify without ⟨PRESIGN⟩).
+ * Used by unit tests; not invoked on the benchmark PreSig path.
+ */
+int adaptor_presignature_assert_incomplete(const adaptor_presignature_t* presig,
+                                           const adaptor_context_t* ctx,
+                                           const uint8_t* message, size_t message_len);
+
 // ============================================================================
 // SIGNATURE COMPLETION
 // ============================================================================
@@ -291,6 +322,26 @@ int adaptor_signature_init(adaptor_signature_t* sig,
 int adaptor_signature_complete(adaptor_signature_t* sig,
                               const adaptor_presignature_t* presig,
                               const uint8_t* witness, size_t witness_len);
+
+/**
+ * Adapt(pk, m, presig, w) exactly as specified in the paper: run PreVerify on the
+ * pre-signature first, then complete it with the witness. adaptor_signature_complete()
+ * is the adaptation core only and assumes the caller has already pre-verified; use this
+ * wrapper when the pre-signature comes from an untrusted party.
+ * @param sig The complete signature to generate
+ * @param presig The pre-signature
+ * @param ctx The adaptor context (supplies pk)
+ * @param message The message m
+ * @param message_len Length of the message
+ * @param witness The witness for completion
+ * @param witness_len Length of the witness
+ * @return ADAPTOR_SUCCESS on success, negative error code on failure
+ */
+int adaptor_signature_adapt(adaptor_signature_t* sig,
+                            const adaptor_presignature_t* presig,
+                            const adaptor_context_t* ctx,
+                            const uint8_t* message, size_t message_len,
+                            const uint8_t* witness, size_t witness_len);
 
 /**
  * Verify complete signature

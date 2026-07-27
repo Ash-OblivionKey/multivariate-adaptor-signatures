@@ -123,8 +123,8 @@ static const char* select_sig_alg_for(adaptor_scheme_type_t scheme, uint32_t lev
         else prefer = "MAYO";
     } else { // UOV
         if (level == 128) prefer = "OV-Is";
-        else if (level == 192) prefer = "OV-Ip";
-        else if (level == 256) prefer = "OV-III";
+        else if (level == 192) prefer = "OV-III";
+        else if (level == 256) prefer = "OV-V";
         else prefer = "OV-";
     }
     // 1) try to find an enabled ID that contains prefer substring

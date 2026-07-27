@@ -90,8 +90,8 @@ static const char* select_sig_alg_for(adaptor_scheme_type_t scheme, uint32_t lev
         else prefer = "MAYO";
     } else { // UOV
         if (level == 128) prefer = "OV-Is";
-        else if (level == 192) prefer = "OV-Ip";
-        else if (level == 256) prefer = "OV-III";
+        else if (level == 192) prefer = "OV-III";
+        else if (level == 256) prefer = "OV-V";
         else prefer = "OV-";
     }
     // 1) try to find an enabled ID that contains prefer substring
@@ -552,6 +552,11 @@ static int run_core_test(uint32_t security_level, adaptor_scheme_type_t scheme) 
         g_test_result.passed = false;
         goto cleanup;
     }
+    if (adaptor_context_set_oqs_algorithm(&ctx, algorithm) != ADAPTOR_SUCCESS) {
+        add_error("Failed to bind liboqs algorithm to adaptor context");
+        g_test_result.passed = false;
+        goto cleanup;
+    }
     g_test_result.operation_times[1] = get_high_res_time_ms() - t2_start;
     
     // T3: Witness Generation
@@ -598,6 +603,43 @@ static int run_core_test(uint32_t security_level, adaptor_scheme_type_t scheme) 
         goto cleanup;
     }
     g_test_result.operation_times[3] = get_high_res_time_ms() - t4_start;
+
+    /* Unit-test incompleteness (bench builds leave ADAPTOR_PRESIG_SELFTEST=0). */
+    if (adaptor_presignature_assert_incomplete(&presig, &ctx,
+            (const uint8_t*)g_test_result.test_message,
+            strlen(g_test_result.test_message)) != ADAPTOR_SUCCESS) {
+        add_error("Pre-signature incompleteness assert failed");
+        g_test_result.passed = false;
+        goto cleanup;
+    }
+
+    /* Encoding round-trip: ⟨"abc"⟩ ≠ ⟨"abc\\0"⟩ ⇒ different h_m (forgery vector closed). */
+    {
+        adaptor_presignature_t p_abc = {0}, p_abcz = {0};
+        const uint8_t msg_abc[] = { 'a', 'b', 'c' };
+        const uint8_t msg_abcz[] = { 'a', 'b', 'c', '\0' };
+        if (adaptor_presignature_init(&p_abc, &ctx) != ADAPTOR_SUCCESS ||
+            adaptor_presignature_init(&p_abcz, &ctx) != ADAPTOR_SUCCESS ||
+            adaptor_presignature_generate(&p_abc, &ctx, msg_abc, 3, statement, sizeof(statement)) != ADAPTOR_SUCCESS ||
+            adaptor_presignature_generate(&p_abcz, &ctx, msg_abcz, 4, statement, sizeof(statement)) != ADAPTOR_SUCCESS) {
+            add_error("Encoding round-trip: failed to PreSign abc vs abc\\0");
+            adaptor_presignature_cleanup(&p_abc);
+            adaptor_presignature_cleanup(&p_abcz);
+            g_test_result.passed = false;
+            goto cleanup;
+        }
+        if (!p_abc.message_hash || !p_abcz.message_hash ||
+            p_abc.message_hash_size != p_abcz.message_hash_size ||
+            OQS_MEM_secure_bcmp(p_abc.message_hash, p_abcz.message_hash, p_abc.message_hash_size) == 0) {
+            add_error("Encoding FAIL: abc and abc\\0 produced identical h_m (length-prefix broken?)");
+            adaptor_presignature_cleanup(&p_abc);
+            adaptor_presignature_cleanup(&p_abcz);
+            g_test_result.passed = false;
+            goto cleanup;
+        }
+        adaptor_presignature_cleanup(&p_abc);
+        adaptor_presignature_cleanup(&p_abcz);
+    }
     
     // T5: Presignature Verification
     double t5_start = get_high_res_time_ms();
@@ -749,6 +791,63 @@ static int run_core_test(uint32_t security_level, adaptor_scheme_type_t scheme) 
         g_test_result.passed = false;
         goto cleanup;
     }
+
+    /* C5 regression: Extract must succeed across different valid pre-signatures
+     * on the same (m, Y). Old code required σ'=σ'' and returned ⊥ here. */
+    {
+        adaptor_presignature_t presig2;
+        adaptor_signature_t sig2;
+        memset(&presig2, 0, sizeof(presig2));
+        memset(&sig2, 0, sizeof(sig2));
+        uint8_t *cross_extracted = malloc(witness_size);
+        if (!cross_extracted) {
+            add_error("C5: malloc failed for cross-extract buffer");
+            g_test_result.passed = false;
+            goto cleanup;
+        }
+        if (adaptor_presignature_init(&presig2, &ctx) != ADAPTOR_SUCCESS ||
+            adaptor_presignature_generate(&presig2, &ctx,
+                (const uint8_t*)g_test_result.test_message,
+                strlen(g_test_result.test_message),
+                statement, sizeof(statement)) != ADAPTOR_SUCCESS) {
+            add_error("C5: failed to generate second pre-signature on same (m,Y)");
+            free(cross_extracted);
+            g_test_result.passed = false;
+            goto cleanup;
+        }
+        if (adaptor_signature_init(&sig2, &presig2, &ctx) != ADAPTOR_SUCCESS ||
+            adaptor_signature_complete(&sig2, &presig2, witness, witness_size) != ADAPTOR_SUCCESS) {
+            add_error("C5: failed to adapt second pre-signature");
+            adaptor_presignature_cleanup(&presig2);
+            free(cross_extracted);
+            g_test_result.passed = false;
+            goto cleanup;
+        }
+        /* Extract(σ̂1, Adapt(σ̂2)) must recover w */
+        if (adaptor_witness_extract(cross_extracted, witness_size, &presig, &sig2) != ADAPTOR_SUCCESS) {
+            add_error("C5 FAIL: Extract(presig1, adapt(presig2)) returned error (σ'=σ'' check regress?)");
+            adaptor_signature_cleanup(&sig2);
+            adaptor_presignature_cleanup(&presig2);
+            OPENSSL_cleanse(cross_extracted, witness_size);
+            free(cross_extracted);
+            g_test_result.passed = false;
+            goto cleanup;
+        }
+        if (OQS_MEM_secure_bcmp(cross_extracted, witness, witness_size) != 0) {
+            add_error("C5 FAIL: cross-extract witness mismatch");
+            adaptor_signature_cleanup(&sig2);
+            adaptor_presignature_cleanup(&presig2);
+            OPENSSL_cleanse(cross_extracted, witness_size);
+            free(cross_extracted);
+            g_test_result.passed = false;
+            goto cleanup;
+        }
+        adaptor_signature_cleanup(&sig2);
+        adaptor_presignature_cleanup(&presig2);
+        OPENSSL_cleanse(cross_extracted, witness_size);
+        free(cross_extracted);
+    }
+
     g_test_result.operation_times[7] = get_high_res_time_ms() - t8_start;
     
     g_test_result.total_time_ms = get_high_res_time_ms() - start_time;

@@ -356,7 +356,7 @@ static bool test_boundary_conditions(adaptor_scheme_type_t scheme, uint32_t leve
     
     // Test 10: Witness size boundaries (maximum)
     (*total_tests)++; (*size_total)++;
-    if (ADAPTOR_MAX_WITNESS_BUFFER_SIZE >= 80 && ADAPTOR_MAX_WITNESS_BUFFER_SIZE <= 1024) { // Reasonable range
+    if (ADAPTOR_MAX_WITNESS_BUFFER_SIZE >= 64 && ADAPTOR_MAX_WITNESS_BUFFER_SIZE <= 1024) { // Reasonable range
         (*tests_passed)++; (*size_passed)++;
     }
     

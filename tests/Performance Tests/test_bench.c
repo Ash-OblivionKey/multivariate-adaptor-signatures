@@ -81,6 +81,10 @@
  #  include <mach/mach_time.h>
  #  include <mach/mach.h>
  #endif
+
+#if defined(__linux__) && defined(__GLIBC__)
+#  include <malloc.h> /* malloc_trim for leak-sanity RSS samples */
+#endif
  
  #include <openssl/rand.h>
  #include <openssl/crypto.h>
@@ -259,6 +263,12 @@ typedef struct {
     size_t completion_memory;
     size_t extraction_memory;
     size_t final_verify_memory;
+    /* Warm process: RSS delta (KB) of one adaptor op with keys already loaded. */
+    double per_op_memory_kb;
+    /* Instantaneous RSS after iter 10 vs end — for leak sanity logging. */
+    size_t rss_after_10_bytes;
+    size_t rss_after_end_bytes;
+    bool leak_sanity_ok;
     
     // Security validation results
     bool witness_hiding_test_passed;
@@ -331,7 +341,9 @@ static void parse_command_line_args(int argc, char* argv[]);
 static void print_usage(const char* program_name);
 static void print_benchmark_header(void);
 static void print_benchmark_footer(void);
-static bool run_benchmark_test(uint32_t security_level, adaptor_scheme_type_t scheme, benchmark_result_t* result);
+static bool run_benchmark_test(uint32_t security_level, adaptor_scheme_type_t scheme,
+                               const char* alg, const char* display_name,
+                               benchmark_result_t* result);
 static void calculate_statistical_metrics(double* data, size_t count, statistical_metrics_t* stats);
 static void print_benchmark_summary(const benchmark_result_t* results, int count);
 static void save_benchmark_csv(const benchmark_result_t* results, int count, const benchmark_environment_t* env);
@@ -379,6 +391,7 @@ static int ensure_dir(const char* dirname) {
 // Algorithm selection functions
 static const char* select_sig_alg_id(const char* prefer_contains, int min_sec_level, int max_sec_level);
 static const char* get_algorithm_id(uint32_t security_level, adaptor_scheme_type_t scheme);
+static const char* get_algorithm_id_by_prefer(const char* prefer);
 static const char* get_algorithm_display_name(uint32_t security_level, adaptor_scheme_type_t scheme);
 static bool is_combo_supported(uint32_t security_level, adaptor_scheme_type_t scheme);
 
@@ -591,6 +604,7 @@ typedef struct {
     const adaptor_params_t* params;
     uint8_t* sk;
     uint8_t* pk;
+    const char* oqs_alg; /* required for ov-Ip etc. when level→name is ambiguous */
 } context_init_wrapper_t;
 
 static int context_init_operation(void* context) {
@@ -612,8 +626,14 @@ static int context_init_operation(void* context) {
     // Clean up context before reinitializing to ensure fresh state for each iteration
     adaptor_context_cleanup(wrapper->ctx);
     
-    // Initialize context with fresh state for accurate timing measurement
-    return adaptor_context_init(wrapper->ctx, wrapper->params, wrapper->sk, wrapper->pk);
+    if (adaptor_context_init(wrapper->ctx, wrapper->params, wrapper->sk, wrapper->pk) != ADAPTOR_SUCCESS) {
+        return -1;
+    }
+    if (wrapper->oqs_alg &&
+        adaptor_context_set_oqs_algorithm(wrapper->ctx, wrapper->oqs_alg) != ADAPTOR_SUCCESS) {
+        return -1;
+    }
+    return ADAPTOR_SUCCESS;
 }
 
 // Signature completion wrapper for amplification timing
@@ -648,8 +668,12 @@ static int completion_operation(void* context) {
         return -1;
     }
     
-    // Complete signature without reinitializing to avoid state corruption
-    // The signature should already be properly initialized
+    /* Amplification re-enters Adapt on the same sigout — must free prior buffers
+     * or each call leaks |σ'|+|Y|+|w| (was the C2.3 RSS growth). */
+    (void)adaptor_signature_cleanup(wrapper->sigout);
+    if (adaptor_signature_init(wrapper->sigout, wrapper->presig, wrapper->ctx) != ADAPTOR_SUCCESS) {
+        return -1;
+    }
     return adaptor_signature_complete(wrapper->sigout, wrapper->presig, wrapper->witness, wrapper->witness_sz);
 }
 
@@ -848,56 +872,41 @@ static void compute_stats(const double *arr, int n,
 */
  
  /* ----- memory usage ----- */
- static size_t current_mem_usage(void) {
+/* Instantaneous resident set — use for per-op delta and leak scaling checks. */
+static size_t get_current_rss_bytes(void) {
 #if defined(_WIN32)
     PROCESS_MEMORY_COUNTERS info;
     if (GetProcessMemoryInfo(GetCurrentProcess(), &info, sizeof(info))) {
-        size_t result = (size_t)info.WorkingSetSize;
-        if (result > (1ULL << 40)) { // Sanity check: > 1TB seems unreasonable
-            if (g_verbose) {
-                printf("WARNING: Unreasonable memory usage reported: %zu bytes\n", result);
-            }
-            return 0;
-        }
-        return result;
-    }
-    if (g_verbose) {
-        printf("WARNING: GetProcessMemoryInfo() failed (errno: %lu)\n", GetLastError());
+        return (size_t)info.WorkingSetSize;
     }
     return 0;
 #elif defined(__APPLE__)
     mach_task_basic_info info;
     mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
-    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,(task_info_t)&info, &count)==KERN_SUCCESS) {
-        size_t result = (size_t)info.resident_size;
-        if (result > (1ULL << 40)) { // Sanity check: > 1TB seems unreasonable
-            if (g_verbose) {
-                printf("WARNING: Unreasonable memory usage reported: %zu bytes\n", result);
-            }
-            return 0;
-        }
-        return result;
-    }
-    if (g_verbose) {
-        printf("WARNING: task_info() failed\n");
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count) == KERN_SUCCESS) {
+        return (size_t)info.resident_size;
     }
     return 0;
 #else
-    struct rusage u;
-    if (getrusage(RUSAGE_SELF, &u) == 0) {
-        size_t result = (size_t)u.ru_maxrss * 1024;
-        if (result > (1ULL << 40)) { // Sanity check: > 1TB seems unreasonable
-            if (g_verbose) {
-                printf("WARNING: Unreasonable memory usage reported: %zu bytes\n", result);
-            }
-            return 0;
+    /* Linux: VmRSS from /proc (ru_maxrss is peak-only and cannot detect leaks). */
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) return 0;
+    char line[256];
+    size_t rss_kb = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "VmRSS: %zu", &rss_kb) == 1) {
+            break;
         }
-        return result;
     }
-    if (g_verbose) {
-        printf("WARNING: getrusage() failed (errno: %d)\n", errno);
-    }
-    return 0;
+    fclose(f);
+    return rss_kb * 1024;
+#endif
+}
+
+/* Prefer returning free pages to the OS before RSS samples (glibc). */
+static void trim_allocator(void) {
+#if defined(__linux__) && defined(__GLIBC__)
+    malloc_trim(0);
 #endif
 }
  
@@ -1018,12 +1027,46 @@ static void cleanup_signature_resources(OQS_SIG* sig_obj, uint8_t* public_key, u
 */
  
 // Algorithm selection functions
+static int ci_strstr(const char *hay, const char *needle) {
+    if (!hay || !needle || !*needle) return 0;
+    size_t n = strlen(needle);
+    for (const char *p = hay; *p; ++p) {
+#if defined(_WIN32)
+        if (_strnicmp(p, needle, n) == 0) return 1;
+#else
+        if (strncasecmp(p, needle, n) == 0) return 1;
+#endif
+    }
+    return 0;
+}
+
+/* Map prefer token to substrings that appear in liboqs 0.14 identifiers. */
+static void prefer_to_needles(const char* prefer, const char** n1, const char** n2) {
+    *n1 = prefer;
+    *n2 = NULL;
+    if (!prefer) return;
+    if (strcmp(prefer, "OV-Is") == 0 || strcmp(prefer, "ov-Is") == 0) {
+        *n1 = "ov_Is"; *n2 = "OV-Is";
+    } else if (strcmp(prefer, "OV-Ip") == 0 || strcmp(prefer, "ov-Ip") == 0) {
+        *n1 = "ov_Ip"; *n2 = "OV-Ip";
+    } else if (strcmp(prefer, "OV-III") == 0 || strcmp(prefer, "ov-III") == 0) {
+        *n1 = "ov_III"; *n2 = "OV-III";
+    } else if (strcmp(prefer, "OV-V") == 0 || strcmp(prefer, "ov-V") == 0) {
+        *n1 = "ov_V"; *n2 = "OV-V";
+    }
+}
+
 static const char* select_sig_alg_id(const char* prefer_contains, int min_sec_level, int max_sec_level) {
      int n = OQS_SIG_alg_count();
+    const char *n1 = prefer_contains, *n2 = NULL;
+    prefer_to_needles(prefer_contains, &n1, &n2);
     for (int i = 0; i < n; i++) {
         const char* id = OQS_SIG_alg_identifier(i);
         if (!id) continue;
-        if (prefer_contains && !strstr(id, prefer_contains)) continue;
+        if (prefer_contains) {
+            int hit = (n1 && ci_strstr(id, n1)) || (n2 && ci_strstr(id, n2));
+            if (!hit) continue;
+        }
         if (!OQS_SIG_alg_is_enabled(id)) continue;
         if (min_sec_level > 0 || max_sec_level > 0) {
             if (strstr(id, "-1") && (min_sec_level>128 || max_sec_level<128)) continue;
@@ -1035,59 +1078,42 @@ static const char* select_sig_alg_id(const char* prefer_contains, int min_sec_le
     return NULL;
 }
 
-static const char* get_algorithm_id(uint32_t security_level, adaptor_scheme_type_t scheme) {
-    // Comprehensive parameter validation
-    if (security_level != 128 && security_level != 192 && security_level != 256) {
-        if (g_verbose) {
-            printf("ERROR: get_algorithm_id called with invalid security level: %u\n", security_level);
-        }
-        return NULL;
-    }
-    
-    if (scheme != ADAPTOR_SCHEME_MAYO && scheme != ADAPTOR_SCHEME_UOV) {
-        if (g_verbose) {
-            printf("ERROR: get_algorithm_id called with invalid scheme: %d\n", scheme);
-        }
-        return NULL;
-    }
-    
-    const char* alg_id = NULL;
-    
-    if (scheme == ADAPTOR_SCHEME_MAYO) {
-        if (security_level == 128) {
-            alg_id = select_sig_alg_id("MAYO-1", 0, 0);
-        } else if (security_level == 192) {
-            alg_id = select_sig_alg_id("MAYO-3", 0, 0);
-        } else if (security_level == 256) {
-            alg_id = select_sig_alg_id("MAYO-5", 0, 0);
-        }
-    } else if (scheme == ADAPTOR_SCHEME_UOV) {
-        if (security_level == 128) {
-            alg_id = select_sig_alg_id("OV-Is", 0, 0);
-        } else if (security_level == 192) {
-            alg_id = select_sig_alg_id("OV-Ip", 0, 0);
-        } else if (security_level == 256) {
-            alg_id = select_sig_alg_id("OV-III", 0, 0);
-        }
-    }
-    
-    // Verify algorithm availability
+/* Resolve OQS algorithm by prefer token (e.g. "OV-Is", "OV-V", "MAYO-1"). */
+static const char* get_algorithm_id_by_prefer(const char* prefer) {
+    if (!prefer) return NULL;
+    const char* alg_id = select_sig_alg_id(prefer, 0, 0);
     if (alg_id && !OQS_SIG_alg_is_enabled(alg_id)) {
         if (g_verbose) {
             printf("WARNING: Algorithm %s is not enabled in this build\n", alg_id);
         }
         return NULL;
     }
-    
     return alg_id;
- }
- 
+}
+
+/* Default NIST-aligned mapping when only (level, scheme) is known. */
+static const char* get_algorithm_id(uint32_t security_level, adaptor_scheme_type_t scheme) {
+    if (security_level != 128 && security_level != 192 && security_level != 256) {
+        return NULL;
+    }
+    if (scheme == ADAPTOR_SCHEME_MAYO) {
+        if (security_level == 128) return get_algorithm_id_by_prefer("MAYO-1");
+        if (security_level == 192) return get_algorithm_id_by_prefer("MAYO-3");
+        if (security_level == 256) return get_algorithm_id_by_prefer("MAYO-5");
+    } else if (scheme == ADAPTOR_SCHEME_UOV) {
+        if (security_level == 128) return get_algorithm_id_by_prefer("OV-Is");
+        if (security_level == 192) return get_algorithm_id_by_prefer("OV-III");
+        if (security_level == 256) return get_algorithm_id_by_prefer("OV-V");
+    }
+    return NULL;
+}
+
 static const char* get_algorithm_display_name(uint32_t security_level, adaptor_scheme_type_t scheme) {
     if (scheme == ADAPTOR_SCHEME_UOV) {
         switch (security_level) {
-            case 128: return "OV-Is";
-            case 192: return "OV-Ip";
-            case 256: return "OV-III";
+            case 128: return "ov-Is";
+            case 192: return "ov-III";
+            case 256: return "ov-V";
             default: return "Unknown UOV";
         }
     } else if (scheme == ADAPTOR_SCHEME_MAYO) {
@@ -1249,7 +1275,7 @@ static const char *select_sig_alg(adaptor_scheme_type_t scheme, uint32_t level) 
     
     adaptor_context_t ctx = {0};
     // Measure context initialization timing with ultra-high precision using amplification
-    context_init_wrapper_t ctx_wrapper = {&ctx, params, sk, pk};
+    context_init_wrapper_t ctx_wrapper = {&ctx, params, sk, pk, alg};
     double ctx_init_time_us = measure_operation_with_amplification(
         context_init_operation, &ctx_wrapper, 100
     );
@@ -1513,7 +1539,7 @@ static const char *select_sig_alg(adaptor_scheme_type_t scheme, uint32_t level) 
     
     // Size validation info for expected parameter behaviors (show only once per scheme/level)
     if (scheme == ADAPTOR_SCHEME_UOV && level == 128 && *pk_sz > 400000 && !uov_128_warning_shown) {
-        printf("INFO: UOV parameter sets have non-monotonic key sizes (OV-Is: 412KB, OV-Ip: 278KB, OV-III: 1.2MB)\n");
+        printf("INFO: UOV parameter sets have non-monotonic key sizes (ov-Is: 412KB, ov-Ip: 278KB, ov-III: 1.2MB, ov-V: ~2.9MB)\n");
         uov_128_warning_shown = true;
     }
     if (scheme == ADAPTOR_SCHEME_MAYO && *sk_sz < 50 && level == 128 && !mayo_128_warning_shown) {
@@ -2367,90 +2393,125 @@ static void print_benchmark_footer(void) {
     
     // Initialize liboqs
     OQS_init();
+
+    /* Pre-flight: verify every suite algorithm is compiled into this liboqs
+     * (especially ov-V, which some configs omit). Fail hard before any long run. */
+    {
+        static const struct { const char* prefer; const char* display; int required; } suite[] = {
+            {"OV-Is",  "ov-Is",  1},
+            {"OV-Ip",  "ov-Ip",  1},
+            {"OV-III", "ov-III", 1},
+            {"OV-V",   "ov-V",   1},
+            {"MAYO-1", "MAYO-1", 1},
+            {"MAYO-3", "MAYO-3", 1},
+            {"MAYO-5", "MAYO-5", 1},
+        };
+        printf("liboqs algorithm availability:\n");
+        int missing_required = 0;
+        for (size_t i = 0; i < sizeof(suite) / sizeof(suite[0]); i++) {
+            const char* id = get_algorithm_id_by_prefer(suite[i].prefer);
+            if (id) {
+                printf("  [OK]   %-8s → %s\n", suite[i].display, id);
+            } else {
+                printf("  [MISS] %-8s (prefer token %s)\n", suite[i].display, suite[i].prefer);
+                if (suite[i].required) missing_required++;
+            }
+        }
+        if (missing_required > 0 && strcmp(g_scheme_filter, "ALL") == 0) {
+            printf("\nERROR: %d required parameter set(s) missing from this liboqs build.\n",
+                   missing_required);
+            printf("       Rebuild liboqs with UOV ov-V / full OV+MAYO enabled before the Pi run.\n");
+            OQS_destroy();
+            return 1;
+        }
+        printf("\n");
+    }
     
-    // Test configurations
-    uint32_t security_levels[] = {128, 192, 256};
-    adaptor_scheme_type_t schemes[] = {ADAPTOR_SCHEME_UOV, ADAPTOR_SCHEME_MAYO};
-    const char* scheme_names[] = {"UOV", "MAYO"};
-    
+    /* Bench combos: UOV ov-Is/Ip/III/V + MAYO-1/3/5.
+     * security_level drives adaptor_get_params / 2λ witness; prefer selects OQS alg. */
+    typedef struct {
+        adaptor_scheme_type_t scheme;
+        uint32_t security_level;
+        const char* prefer;
+        const char* display;
+        const char* scheme_name;
+    } bench_combo_t;
+    static const bench_combo_t combos[] = {
+        {ADAPTOR_SCHEME_UOV,  128, "OV-Is",  "ov-Is",  "UOV"},
+        {ADAPTOR_SCHEME_UOV,  128, "OV-Ip",  "ov-Ip",  "UOV"},
+        {ADAPTOR_SCHEME_UOV,  192, "OV-III", "ov-III", "UOV"},
+        {ADAPTOR_SCHEME_UOV,  256, "OV-V",   "ov-V",   "UOV"},
+        {ADAPTOR_SCHEME_MAYO, 128, "MAYO-1", "MAYO-1", "MAYO"},
+        {ADAPTOR_SCHEME_MAYO, 192, "MAYO-3", "MAYO-3", "MAYO"},
+        {ADAPTOR_SCHEME_MAYO, 256, "MAYO-5", "MAYO-5", "MAYO"},
+    };
+    const int ncombos = (int)(sizeof(combos) / sizeof(combos[0]));
+
     int total_tests = 0;
     int completed_tests = 0;
     benchmark_result_t* results = NULL;
-    
-    // Count total tests based on filter
-    for (int s = 0; s < 2; s++) {
-        if (strcmp(g_scheme_filter, "ALL") != 0 && 
-            strcmp(g_scheme_filter, scheme_names[s]) != 0) {
+
+    for (int c = 0; c < ncombos; c++) {
+        if (strcmp(g_scheme_filter, "ALL") != 0 &&
+            strcmp(g_scheme_filter, combos[c].scheme_name) != 0) {
             continue;
         }
-        total_tests += 3; // 3 security levels
+        total_tests++;
     }
-    
+
     if (total_tests == 0) {
         printf("ERROR: No tests to run with current filter: %s\n", g_scheme_filter);
          OQS_destroy();
          return 1;
      }
- 
-    // Allocate results array
-    results = malloc(total_tests * sizeof(benchmark_result_t));
+
+    results = malloc((size_t)total_tests * sizeof(benchmark_result_t));
     if (!results) {
         printf("ERROR: Failed to allocate memory for results\n");
         OQS_destroy();
         return 1;
     }
-    
+
     print_benchmark_header();
-    
+
     int test_index = 0;
-    
-    // Run benchmarks
-    for (int s = 0; s < 2; s++) {
-        adaptor_scheme_type_t scheme = schemes[s];
-        const char* scheme_name = scheme_names[s];
-        
-        // Skip if filtered out
-        if (strcmp(g_scheme_filter, "ALL") != 0 && 
-            strcmp(g_scheme_filter, scheme_name) != 0) {
+
+    for (int c = 0; c < ncombos; c++) {
+        const bench_combo_t* combo = &combos[c];
+        if (strcmp(g_scheme_filter, "ALL") != 0 &&
+            strcmp(g_scheme_filter, combo->scheme_name) != 0) {
             continue;
         }
-        
-        printf("\nBenchmarking %s Scheme:\n", scheme_name);
-        printf("========================\n");
-        
-        for (int i = 0; i < 3; i++) {
-            uint32_t level = security_levels[i];
-            printf("\n%s %u-bit Performance Benchmark (%d iterations)\n", 
-                   scheme_name, level, g_iterations);
-            printf("--------------------------------------------------------\n");
 
-            if (!is_combo_supported(level, scheme)) {
-                printf("    SKIP: adaptor not implemented for %s %u-bit in this build\n",
-                       scheme_name, level);
-                // Fill a "skipped" result row so CSV/JSON stay aligned
-                memset(&results[test_index], 0, sizeof(results[test_index]));
-                results[test_index].security_level = level;
-                results[test_index].scheme = scheme;
-                results[test_index].algorithm = get_algorithm_display_name(level, scheme);
-                results[test_index].iterations = g_iterations;
-                results[test_index].warmup_iterations = g_warmup;
-                results[test_index].error_code = -100; // sentinel for "not supported"
-                strcpy(results[test_index].error_message, "Adaptor combo not supported");
-                test_index++;
-                continue;
-            }
-            
-            if (run_benchmark_test(level, scheme, &results[test_index])) {
-                completed_tests++;
-                printf("COMPLETED: %s %u-bit benchmark completed\n", scheme_name, level);
-            } else {
-                printf("ERROR: %s %u-bit benchmark failed\n", scheme_name, level);
-            }
-            
+        printf("\nBenchmarking %s / %s (λ=%u, %d iterations)\n",
+               combo->scheme_name, combo->display, combo->security_level, g_iterations);
+        printf("--------------------------------------------------------\n");
+
+        const char* alg = get_algorithm_id_by_prefer(combo->prefer);
+        if (!alg) {
+            printf("    SKIP: %s not available in this liboqs build\n", combo->prefer);
+            memset(&results[test_index], 0, sizeof(results[test_index]));
+            results[test_index].security_level = combo->security_level;
+            results[test_index].scheme = combo->scheme;
+            results[test_index].algorithm = combo->display;
+            results[test_index].iterations = g_iterations;
+            results[test_index].warmup_iterations = g_warmup;
+            results[test_index].error_code = -100;
+            strcpy(results[test_index].error_message, "Adaptor combo not supported");
             test_index++;
+            continue;
         }
+
+        if (run_benchmark_test(combo->security_level, combo->scheme, alg, combo->display,
+                               &results[test_index])) {
+            completed_tests++;
+            printf("COMPLETED: %s benchmark completed\n", combo->display);
+        } else {
+            printf("ERROR: %s benchmark failed\n", combo->display);
+        }
+        test_index++;
     }
-    
+
     // Print summary
     print_benchmark_summary(results, total_tests);
     print_benchmark_footer();
@@ -2479,24 +2540,116 @@ static void print_benchmark_footer(void) {
     return (completed_tests == total_tests) ? 0 : 1;
 }
 
+/*
+ * C2.2: With library + key material already loaded, sample RSS before/after one
+ * PreSign→Adapt→Verify→Extract cycle. Peak process RSS is dominated by one-time
+ * allocations; this delta should be kilobytes.
+ */
+static double measure_warm_per_op_memory_kb(const char* alg, adaptor_scheme_type_t scheme,
+                                           uint32_t security_level) {
+    if (!alg) return 0.0;
+
+    OQS_SIG *sig = OQS_SIG_new(alg);
+    if (!sig) return 0.0;
+
+    uint8_t *pk = malloc(sig->length_public_key);
+    uint8_t *sk = malloc(sig->length_secret_key);
+    if (!pk || !sk) {
+        free(pk); free(sk); OQS_SIG_free(sig);
+        return 0.0;
+    }
+    if (OQS_SIG_keypair(sig, pk, sk) != OQS_SUCCESS) {
+        free(pk); free(sk); OQS_SIG_free(sig);
+        return 0.0;
+    }
+
+    const adaptor_params_t *params = adaptor_get_params(security_level, scheme);
+    adaptor_context_t ctx = {0};
+    if (!params || adaptor_context_init(&ctx, params, sk, pk) != ADAPTOR_SUCCESS ||
+        adaptor_context_set_oqs_algorithm(&ctx, alg) != ADAPTOR_SUCCESS) {
+        free(pk); free(sk); OQS_SIG_free(sig);
+        return 0.0;
+    }
+
+    size_t wlen = adaptor_witness_size(&ctx);
+    uint8_t *witness = malloc(wlen);
+    uint8_t statement[ADAPTOR_STATEMENT_SIZE];
+    const uint8_t msg[] = "MWAS-per-op-mem";
+    if (!witness || RAND_bytes(witness, (int)wlen) != 1 ||
+        adaptor_generate_statement_from_witness(witness, wlen, statement, sizeof(statement)) != ADAPTOR_SUCCESS) {
+        free(witness);
+        adaptor_context_cleanup(&ctx);
+        OPENSSL_cleanse(sk, sig->length_secret_key);
+        free(pk); free(sk); OQS_SIG_free(sig);
+        return 0.0;
+    }
+
+    /* Warm: one throwaway cycle so pages are touched. */
+    {
+        adaptor_presignature_t p = {0};
+        adaptor_signature_t s = {0};
+        if (adaptor_presignature_init(&p, &ctx) == ADAPTOR_SUCCESS &&
+            adaptor_presignature_generate(&p, &ctx, msg, sizeof(msg) - 1, statement, sizeof(statement)) == ADAPTOR_SUCCESS &&
+            adaptor_signature_init(&s, &p, &ctx) == ADAPTOR_SUCCESS &&
+            adaptor_signature_complete(&s, &p, witness, wlen) == ADAPTOR_SUCCESS) {
+            (void)adaptor_signature_verify(&s, &ctx, msg, sizeof(msg) - 1);
+        }
+        adaptor_signature_cleanup(&s);
+        adaptor_presignature_cleanup(&p);
+    }
+
+    size_t before = get_current_rss_bytes();
+
+    adaptor_presignature_t presig = {0};
+    adaptor_signature_t sigout = {0};
+    uint8_t extracted[ADAPTOR_MAX_WITNESS_BUFFER_SIZE];
+    bool ok = false;
+    if (adaptor_presignature_init(&presig, &ctx) == ADAPTOR_SUCCESS &&
+        adaptor_presignature_generate(&presig, &ctx, msg, sizeof(msg) - 1, statement, sizeof(statement)) == ADAPTOR_SUCCESS &&
+        adaptor_presignature_verify(&presig, &ctx, msg, sizeof(msg) - 1) == ADAPTOR_SUCCESS &&
+        adaptor_signature_init(&sigout, &presig, &ctx) == ADAPTOR_SUCCESS &&
+        adaptor_signature_complete(&sigout, &presig, witness, wlen) == ADAPTOR_SUCCESS &&
+        adaptor_signature_verify(&sigout, &ctx, msg, sizeof(msg) - 1) == ADAPTOR_SUCCESS &&
+        adaptor_witness_extract(extracted, wlen, &presig, &sigout) == ADAPTOR_SUCCESS) {
+        ok = true;
+    }
+
+    size_t after = get_current_rss_bytes();
+    adaptor_signature_cleanup(&sigout);
+    adaptor_presignature_cleanup(&presig);
+
+    OPENSSL_cleanse(witness, wlen);
+    free(witness);
+    adaptor_context_cleanup(&ctx);
+    OPENSSL_cleanse(sk, sig->length_secret_key);
+    free(pk); free(sk); OQS_SIG_free(sig);
+
+    if (!ok || after < before) return 0.0;
+    return (double)(after - before) / 1024.0;
+}
+
 // Enhanced single configuration benchmark implementation
-static bool run_benchmark_test(uint32_t security_level, adaptor_scheme_type_t scheme, benchmark_result_t* result) {
+static bool run_benchmark_test(uint32_t security_level, adaptor_scheme_type_t scheme,
+                               const char* alg, const char* display_name,
+                               benchmark_result_t* result) {
     // Initialize result structure
     memset(result, 0, sizeof(benchmark_result_t));
     result->security_level = security_level;
     result->scheme = scheme;
-    result->algorithm = get_algorithm_display_name(security_level, scheme);
+    result->algorithm = display_name ? display_name : get_algorithm_display_name(security_level, scheme);
     result->iterations = g_iterations;
     result->warmup_iterations = g_warmup;
+    /* Peak_Memory_MB = max instantaneous RSS during this config (not process HWM). */
+    result->peak_memory_usage = 0;
+    result->leak_sanity_ok = true;
+    result->per_op_memory_kb = 0.0;
     
-    printf("    Setting up benchmark for %s %u-bit...\n", 
-           (scheme == ADAPTOR_SCHEME_UOV) ? "UOV" : "MAYO", security_level);
+    printf("    Setting up benchmark for %s / %s (λ=%u)...\n", 
+           (scheme == ADAPTOR_SCHEME_UOV) ? "UOV" : "MAYO",
+           result->algorithm, security_level);
     
-    // Get algorithm ID
-    const char* alg = get_algorithm_id(security_level, scheme);
     if (!alg) {
-        printf("    ERROR: Algorithm not available for %s %u-bit\n", 
-               (scheme == ADAPTOR_SCHEME_UOV) ? "UOV" : "MAYO", security_level);
+        printf("    ERROR: Algorithm not available for %s\n", result->algorithm);
         result->error_code = -1;
         strcpy(result->error_message, "Algorithm not available");
         return false;
@@ -2551,6 +2704,7 @@ static bool run_benchmark_test(uint32_t security_level, adaptor_scheme_type_t sc
     size_t pk_size = 0, sk_size = 0, witness_size = 0, stmt_size = 0, sig_size = 0, presig_size = 0;
     int completed_iterations = 0;
     int witness_hiding_passed = 0, extractability_passed = 0;
+    size_t rss_after_10 = 0;
     
     printf("    Running %d benchmark iterations...\n", g_iterations);
     
@@ -2594,8 +2748,19 @@ static bool run_benchmark_test(uint32_t security_level, adaptor_scheme_type_t sc
                 // Track security validation results
                 if (witness_hiding_ok) witness_hiding_passed++;
                 if (extractability_ok) extractability_passed++;
-                
+
+                {
+                    size_t cur = get_current_rss_bytes();
+                    if (cur > result->peak_memory_usage) result->peak_memory_usage = cur;
+                }
+
                 completed_iterations++;
+
+                /* C2.3: instantaneous RSS after cleanup — must not scale with iter count. */
+                if (completed_iterations == 10) {
+                    trim_allocator();
+                    rss_after_10 = get_current_rss_bytes();
+                }
             }
         }
     }
@@ -2639,27 +2804,39 @@ static bool run_benchmark_test(uint32_t security_level, adaptor_scheme_type_t sc
     result->witness_size = witness_size;
     result->commitment_size = stmt_size;
     
-    // Memory usage - measure peak WorkingSet during operations with enhanced consistency
-    // Take multiple measurements and use the maximum, with security level scaling
-    size_t mem1 = current_mem_usage();
-    size_t mem2 = current_mem_usage();
-    size_t mem3 = current_mem_usage();
-    size_t base_memory = (mem1 > mem2) ? ((mem1 > mem3) ? mem1 : mem3) : ((mem2 > mem3) ? mem2 : mem3);
-    
-    // Apply security level scaling for consistent memory usage patterns
-    double security_factor = 1.0;
-    if (security_level == 192) {
-        security_factor = 1.5; // 50% more memory for 192-bit
-    } else if (security_level == 256) {
-        security_factor = 2.2; // 120% more memory for 256-bit
+    /* Final sample of this config's working set (still not lifetime HWM). */
+    {
+        size_t cur = get_current_rss_bytes();
+        if (cur > result->peak_memory_usage) result->peak_memory_usage = cur;
     }
-    
-    // Apply scheme-specific scaling
-    if (scheme == ADAPTOR_SCHEME_UOV) {
-        security_factor *= 1.2; // UOV typically uses more memory
+
+    /* C2.2: warm per-op RSS delta (KB). */
+    result->per_op_memory_kb = measure_warm_per_op_memory_kb(alg, scheme, security_level);
+    printf("    Per-op memory delta (warm): %.1f KB | Peak RSS (this config): %.2f MB\n",
+           result->per_op_memory_kb,
+           (double)result->peak_memory_usage / (1024.0 * 1024.0));
+
+    /* C2.3 leak sanity: instantaneous RSS after 10 vs end must not scale with N. */
+    trim_allocator();
+    result->rss_after_10_bytes = rss_after_10;
+    result->rss_after_end_bytes = get_current_rss_bytes();
+    result->leak_sanity_ok = true;
+    if (completed_iterations >= 10 && rss_after_10 > 0) {
+        size_t growth = (result->rss_after_end_bytes > rss_after_10)
+                            ? (result->rss_after_end_bytes - rss_after_10) : 0;
+        /* Allow ~2 MB allocator noise; more suggests per-iteration leak. */
+        if (growth > (2ull * 1024ull * 1024ull)) {
+            result->leak_sanity_ok = false;
+            printf("    WARNING: C2.3 leak sanity FAILED — RSS grew %zu MB from iter 10→%d "
+                   "(peak scales with N if keypair/OQS_SIG not freed)\n",
+                   growth / (1024 * 1024), completed_iterations);
+        } else {
+            printf("    C2.3 leak sanity: OK (RSS Δ after iter 10→%d = %zu KB)\n",
+                   completed_iterations, growth / 1024);
+        }
+    } else if (g_iterations >= 10) {
+        printf("    C2.3 leak sanity: skipped (need ≥10 successful iterations)\n");
     }
-    
-    result->peak_memory_usage = (size_t)(base_memory * security_factor);
     
     // Security properties validation
     result->witness_hiding_verified = (witness_hiding_passed == completed_iterations);
@@ -2781,7 +2958,7 @@ static void print_benchmark_summary(const benchmark_result_t* results, int count
     
     // General section
     printf("General\n");
-    printf("  Configs           : %d  (UOV/MAYO × 128,192,256)\n", count);
+    printf("  Configs           : %d  (UOV ov-Is/ov-Ip/ov-III/ov-V + MAYO-1/3/5)\n", count);
     printf("  Iterations/config : %d   Warmup: %d\n", g_iterations, g_warmup);
     printf("  RNG Mode          : %s    Build: Release (-O3 -DNDEBUG)\n", 
            g_rng_seed == 0 ? "system (DRBG-CTR)" : "deterministic");
@@ -3173,12 +3350,14 @@ static void save_benchmark_csv(const benchmark_result_t* results, int count, con
     // Write minimal essential metadata header with error handling
     if (env) {
         if (fprintf(file, "# Multivariate Witness Hiding Adaptor Signatures - Benchmark Results\n") < 0 ||
-            fprintf(file, "# Schema Version: 3.0 | Build: %s | Timestamp: %s\n", env->build_type, env->timestamp) < 0 ||
+            fprintf(file, "# Schema Version: 4.0 | Build: %s | Timestamp: %s\n", env->build_type, env->timestamp) < 0 ||
             fprintf(file, "# Environment: %s, %s, OpenSSL %s, liboqs %s\n", 
                    env->os_version, env->compiler, OpenSSL_version(OPENSSL_VERSION_STRING), env->liboqs_version) < 0 ||
             fprintf(file, "# CPU: %s (%d/%d cores) | RAM: %zu MB | AVX2: %s\n", 
                    env->cpu_model, env->cpu_cores, env->cpu_threads, env->total_ram_mb,
                    env->avx2_enabled ? "Yes" : "No") < 0 ||
+            fprintf(file, "# Sizes: PublicKey_Bytes=|pk|; SigmaPrime_Bytes=|σ'|; Signature_Bytes=|σ|=|σ'|+|w|\n") < 0 ||
+            fprintf(file, "# Memory: Peak_Memory_MB=max RSS during config; PerOp_Memory_KB=warm adaptor-op RSS delta\n") < 0 ||
             fprintf(file, "\n") < 0) {
             printf("ERROR: Failed to write CSV header (errno: %d)\n", errno);
             fclose(file);
@@ -3187,7 +3366,7 @@ static void save_benchmark_csv(const benchmark_result_t* results, int count, con
     }
     
     // Professional CSV header with organized sections
-    fprintf(file, "Test_ID,Scheme,Security_Level,Algorithm,Iterations,Success_Rate_Percent,");
+    fprintf(file, "Test_ID,Scheme,Security_Level,Param_Set,Algorithm,Iterations,Success_Rate_Percent,");
     fprintf(file, "KeyGen_Mean_ms,KeyGen_Std_ms,KeyGen_Min_ms,KeyGen_Max_ms,");
     fprintf(file, "PresigGen_Mean_ms,PresigGen_Std_ms,PresigGen_Min_ms,PresigGen_Max_ms,");
     fprintf(file, "PresigVerify_Mean_ms,PresigVerify_Std_ms,PresigVerify_Min_ms,PresigVerify_Max_ms,");
@@ -3197,20 +3376,22 @@ static void save_benchmark_csv(const benchmark_result_t* results, int count, con
     fprintf(file, "StandardSign_Mean_ms,StandardSign_Std_ms,StandardSign_Min_ms,StandardSign_Max_ms,");
     fprintf(file, "TotalWorkflow_Mean_ms,TotalWorkflow_Std_ms,TotalWorkflow_Min_ms,TotalWorkflow_Max_ms,");
     fprintf(file, "Throughput_OpsPerSec,Stability_Percent,Coefficient_Variation,");
-    fprintf(file, "PublicKey_Size_Bytes,PrivateKey_Size_Bytes,Signature_Size_Bytes,Presignature_Size_Bytes,");
+    fprintf(file, "PublicKey_Bytes,PrivateKey_Bytes,Signature_Bytes,SigmaPrime_Bytes,");
     fprintf(file, "Witness_Size_Bytes,Commitment_Size_Bytes,");
     fprintf(file, "Witness_Hiding_Test,Extractability_Test,Functional_Validation_Status,");
-    fprintf(file, "Peak_Memory_MB,Test_Duration_Seconds,Timestamp\n");
+    fprintf(file, "Peak_Memory_MB,PerOp_Memory_KB,Leak_Sanity,Test_Duration_Seconds,Timestamp\n");
     
     // Write professional data rows with comprehensive metrics
     for (int i = 0; i < count; i++) {
         const benchmark_result_t* result = &results[i];
         const char* scheme_name = (result->scheme == ADAPTOR_SCHEME_UOV) ? "UOV" : "MAYO";
-        const char* algorithm = get_algorithm_display_name(result->security_level, result->scheme);
+        /* Param_Set = NIST/spec name (ov-Is / ov-Ip / …); never re-derive from level alone
+         * (level 128 is both ov-Is and ov-Ip). */
+        const char* param_set = result->algorithm ? result->algorithm : "unknown";
         
         // Test identification and basic info
-        fprintf(file, "%d,%s,%u,%s,%d,%.1f,",
-                i + 1, scheme_name, result->security_level, algorithm, 
+        fprintf(file, "%d,%s,%u,%s,%s,%d,%.1f,",
+                i + 1, scheme_name, result->security_level, param_set, param_set,
                 result->iterations, result->overall_success_rate);
         
         // KeyGen statistics (mean, std, min, max)
@@ -3260,7 +3441,7 @@ static void save_benchmark_csv(const benchmark_result_t* results, int count, con
         fprintf(file, "%.2f,%.1f,%.3f,",
                 throughput, stability, cv);
         
-        // Size metrics
+        // Size metrics: pk, sk, |σ|, |σ'|, |w|, |Y|
         fprintf(file, "%zu,%zu,%zu,%zu,%zu,%zu,",
                 result->public_key_size, result->private_key_size, 
                 result->signature_size, result->presignature_size,
@@ -3274,9 +3455,14 @@ static void save_benchmark_csv(const benchmark_result_t* results, int count, con
                 result->witness_extractability_test_passed ? "PASS" : "FAIL",
                 functional_status);
         
-        // System metrics
-        fprintf(file, "%zu,%.2f,%s\n",
-                result->peak_memory_usage, result->total_workflow_mean, "N/A");
+        /* Peak_Memory_MB: max instantaneous RSS during this config (MB). */
+        {
+            double peak_mb = (double)result->peak_memory_usage / (1024.0 * 1024.0);
+            fprintf(file, "%.3f,%.1f,%s,%.2f,%s\n",
+                    peak_mb, result->per_op_memory_kb,
+                    result->leak_sanity_ok ? "PASS" : "FAIL",
+                    result->total_workflow_mean, "N/A");
+        }
     }
     
     // Add professional documentation at the end of CSV file
@@ -3287,8 +3473,9 @@ static void save_benchmark_csv(const benchmark_result_t* results, int count, con
         fprintf(file, "# COLUMN DESCRIPTIONS:\n") < 0 ||
         fprintf(file, "# Test_ID: Sequential test identifier (1-6)\n") < 0 ||
         fprintf(file, "# Scheme: Cryptographic scheme (UOV/MAYO)\n") < 0 ||
-        fprintf(file, "# Security_Level: Security strength in bits (128/192/256)\n") < 0 ||
-        fprintf(file, "# Algorithm: Specific algorithm implementation (OV-Is/OV-Ip/OV-III/MAYO-1/MAYO-3/MAYO-5)\n") < 0 ||
+        fprintf(file, "# Security_Level: NIST security strength in bits (128/192/256)\n") < 0 ||
+        fprintf(file, "# Param_Set: Spec name (ov-Is/ov-Ip/ov-III/ov-V/MAYO-1/MAYO-3/MAYO-5)\n") < 0 ||
+        fprintf(file, "# Algorithm: Same as Param_Set (kept for tooling compatibility)\n") < 0 ||
         fprintf(file, "# Iterations: Number of benchmark iterations performed\n") < 0 ||
         fprintf(file, "# Success_Rate_Percent: Percentage of successful operations (100.0 = all passed)\n") < 0 ||
         fprintf(file, "# [Operation]_Mean_ms: Average execution time in milliseconds\n") < 0 ||
@@ -3298,10 +3485,14 @@ static void save_benchmark_csv(const benchmark_result_t* results, int count, con
         fprintf(file, "# Throughput_OpsPerSec: Operations per second (1000/Mean_ms)\n") < 0 ||
         fprintf(file, "# Stability_Percent: Performance stability (100*(1-CV))\n") < 0 ||
         fprintf(file, "# Coefficient_Variation: Coefficient of variation (Std/Mean)\n") < 0 ||
-        fprintf(file, "# [Type]_Size_Bytes: Size in bytes for keys, signatures, etc.\n") < 0 ||
+        fprintf(file, "# PublicKey_Bytes: |pk| from liboqs\n") < 0 ||
+        fprintf(file, "# SigmaPrime_Bytes: measured |σ'| (base-scheme signature in pre-signature)\n") < 0 ||
+        fprintf(file, "# Signature_Bytes: measured |σ| = |σ'|+|w|\n") < 0 ||
         fprintf(file, "# [Test]_Test: Security validation results (PASS/FAIL)\n") < 0 ||
         fprintf(file, "# Functional_Validation_Status: Overall validation status\n") < 0 ||
-        fprintf(file, "# Peak_Memory_MB: Peak memory usage during test\n") < 0 ||
+        fprintf(file, "# Peak_Memory_MB: Max instantaneous RSS during this config (megabytes)\n") < 0 ||
+        fprintf(file, "# PerOp_Memory_KB: Warm single-adaptor-op RSS delta (kilobytes)\n") < 0 ||
+        fprintf(file, "# Leak_Sanity: PASS if instantaneous RSS after iter 10≈end\n") < 0 ||
         fprintf(file, "# Test_Duration_Seconds: Total test execution time\n") < 0 ||
         fprintf(file, "# Timestamp: Test execution timestamp\n") < 0 ||
         fprintf(file, "#\n") < 0 ||
