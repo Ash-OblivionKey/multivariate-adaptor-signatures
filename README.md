@@ -1,11 +1,24 @@
 # Multivariate Witness Hiding Adaptor Signatures (MWAS)
 
+<<<<<<< Updated upstream
 A research implementation of Multivariate Witness Hiding Adaptor Signatures (MWAS) extending UOV and MAYO post-quantum signature schemes with adaptor functionality. 
 
 ## Overview
 
 This project implements a novel cryptographic primitive that combines multivariate cryptography (UOV and MAYO schemes), witness hiding properties, adaptor signature functionality, and post-quantum security guarantees. The implementation provides comprehensive testing, benchmarking, and performance analysis tools for evaluating the schemes under various network conditions.
 
+=======
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](build.bat)
+[![Research](https://img.shields.io/badge/type-research-orange.svg)](README.md)
+
+A research implementation of Multivariate Witness Hiding Adaptor Signatures (MWAS) extending UOV and MAYO post-quantum signature schemes with adaptor functionality. 
+
+## Overview
+
+This project implements a novel cryptographic primitive that combines multivariate cryptography (UOV and MAYO schemes), witness hiding properties, adaptor signature functionality, and post-quantum security guarantees. The implementation provides comprehensive testing, benchmarking, and performance analysis tools for evaluating the schemes under various network conditions.
+
+>>>>>>> Stashed changes
 ## Architecture
 
 ```
@@ -37,6 +50,55 @@ results/
 - Docker (optional, for containerized builds)
 
 ### System Setup Commands
+<<<<<<< Updated upstream
+=======
+
+#### Ubuntu/Debian
+```bash
+# Update system packages
+sudo apt update && sudo apt upgrade -y
+
+# Install build essentials and dependencies
+sudo apt install -y build-essential cmake git wget curl
+sudo apt install -y libssl-dev pkg-config
+sudo apt install -y python3 python3-pip python3-venv
+sudo apt install -y python3-dev python3-numpy python3-matplotlib
+
+# Install Python packages for graph generation
+pip3 install numpy pandas matplotlib seaborn
+```
+
+#### CentOS/RHEL/Fedora
+```bash
+# Update system packages
+sudo dnf update -y  # or sudo yum update -y for older versions
+
+# Install build essentials and dependencies
+sudo dnf install -y gcc gcc-c++ make cmake git wget curl
+sudo dnf install -y openssl-devel pkgconfig
+sudo dnf install -y python3 python3-pip python3-devel
+sudo dnf install -y numpy matplotlib
+
+# Install Python packages for graph generation
+pip3 install pandas seaborn
+```
+
+#### Arch Linux
+```bash
+# Update system packages
+sudo pacman -Syu
+
+# Install build essentials and dependencies
+sudo pacman -S base-devel cmake git wget curl
+sudo pacman -S openssl pkgconf
+sudo pacman -S python python-pip
+sudo pacman -S python-numpy python-matplotlib
+
+# Install Python packages for graph generation
+pip install pandas seaborn
+```
+
+>>>>>>> Stashed changes
 ## Installation
 
 > **Recommended**: We suggest using Linux for the best compatibility and performance. Docker may have limitations with certain cryptographic operations and network latency testing.
@@ -52,12 +114,15 @@ sudo apt update && sudo apt install -y build-essential cmake pkg-config libssl-d
 sudo apt install -y git python3 python3-pip
 
 # Install Python packages for analysis and graph generation
+<<<<<<< Updated upstream
 sudo apt install python3.12-venv
 python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
 pip install numpy pandas matplotlib seaborn
 Or
+=======
+>>>>>>> Stashed changes
 pip3 install numpy pandas matplotlib seaborn
 
 git clone https://github.com/Ash-OblivionKey/multivariate-adaptor-signatures.git
@@ -98,6 +163,23 @@ cd ../..
 
 build.bat
 ```
+<<<<<<< Updated upstream
+=======
+
+**Alternative for Windows (if Visual Studio not available):**
+```cmd
+# Install MinGW-w64 or use Git Bash with make
+cmake -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DOQS_USE_OPENSSL=ON -DOQS_BUILD_ONLY_LIB=ON -DOQS_DIST_BUILD=ON ..
+mingw32-make -j4
+```
+
+### Docker
+
+```bash
+docker-compose up --build
+```
+
+>>>>>>> Stashed changes
 ## Troubleshooting
 
 ### Common Build Issues
@@ -184,6 +266,7 @@ cd build/bin/Integration_Tests
 ./test_integration
 ```
 
+<<<<<<< Updated upstream
 ### Performance Tests 
 ## To Get Paper Results Use Commands Onwards
 ```bash
@@ -195,6 +278,19 @@ cd build/bin/Performance_Tests
 
 ### Baseline Benchmark
 
+=======
+### Performance Tests
+
+```bash
+cd build/bin/Performance_Tests
+./test_bench --iterations 1000 --warmup 10 --csv
+```
+
+## Performance Analysis
+
+### Baseline Benchmark
+
+>>>>>>> Stashed changes
 ```bash
 ./build/bin/Performance_Tests/test_bench
 mv benchmark_results.csv results/performance/raw_bench.csv
@@ -258,9 +354,22 @@ The analysis script automatically:
 ## Research Context
 
 This implementation is part of ongoing research into post-quantum cryptographic primitives. The adaptor signature functionality enables atomic swaps in blockchain applications, payment channels with dispute resolution, cross-chain interoperability protocols, and privacy-preserving transaction schemes.
+<<<<<<< Updated upstream
 
 ## Disclaimer
 
 This is a research implementation and should not be used in production systems. The code is provided for educational and research purposes only.
 
 
+=======
+
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Disclaimer
+
+This is a research implementation and should not be used in production systems. The code is provided for educational and research purposes only.
+
+>>>>>>> Stashed changes
